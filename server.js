@@ -9,12 +9,13 @@ const app = express();
 const PORT = 3001;
 
 // Middleware
-// (تعديل CORS للسماح بالرابط الصحيح)
+// (*** تعديل CORS للسماح بالرابط الصحيح tawal-platform ***)
 const corsOptions = {
-  origin: 'https://tarekalcyed.github.io',
+  origin: 'https://tarekalsyed.github.io', // الرابط الأساسي مسموح به
   optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
+// (*** نهاية التعديل ***)
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -29,7 +30,7 @@ const db = new sqlite3.Database('./tawal_academy.db', (err) => {
   }
 });
 
-// تهيئة قاعدة البيانات (*** تمت إضافة جدول جديد ***)
+// تهيئة قاعدة البيانات (مع جدول الأنشطة)
 function initializeDatabase() {
   db.serialize(() => {
     // جدول الطلاب
@@ -67,7 +68,7 @@ function initializeDatabase() {
       )
     `);
 
-    // (*** جديد: جدول سجل الأنشطة ***)
+    // (جديد: جدول سجل الأنشطة)
     db.run(`
       CREATE TABLE IF NOT EXISTS activity_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -246,15 +247,13 @@ app.get('/api/admin/login-logs', (req, res) => {
   );
 });
 
-// (*** جديد: Endpoint لتسجيل الأنشطة ***)
+// (جديد: Endpoint لتسجيل الأنشطة)
 // 11. تسجيل نشاط
 app.post('/api/log-activity', (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
-
     if (!studentId || !activityType) {
         return res.status(400).json({ error: 'بيانات ناقصة' });
     }
-
     db.run(
         'INSERT INTO activity_logs (studentId, activityType, subjectName) VALUES (?, ?, ?)',
         [studentId, activityType, subjectName || null],
@@ -267,7 +266,7 @@ app.post('/api/log-activity', (req, res) => {
     );
 });
 
-// (*** جديد: Endpoint لجلب الأنشطة للإدارة ***)
+// (جديد: Endpoint لجلب الأنشطة للإدارة)
 // 12. جلب سجلات الأنشطة (للإدارة)
 app.get('/api/admin/activity-logs', (req, res) => {
     db.all(
@@ -290,7 +289,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'الخادم يعمل بشكل صحيح' });
 });
 
-// بدء الخادم (*** تم تحديث قائمة الـ Endpoints ***)
+// بدء الخادم (تم تحديث قائمة الـ Endpoints)
 app.listen(PORT, () => {
   console.log(`\n✓ الخادم يعمل على: http://localhost:${PORT}`);
   console.log(`✓ API متاح على: http://localhost:${PORT}/api`);
