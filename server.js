@@ -9,9 +9,9 @@ const app = express();
 const PORT = 3001;
 
 // Middleware
-// (*** تعديل CORS للسماح بالرابط الصحيح tawal-platform ***)
+// (*** تعديل CORS للسماح بالرابط الصحيح ***)
 const corsOptions = {
-  origin: 'https://tarekalsyed.github.io', // الرابط الأساسي مسموح به
+  origin: 'https://tarekalcyed.github.io',
   optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
@@ -30,7 +30,7 @@ const db = new sqlite3.Database('./tawal_academy.db', (err) => {
   }
 });
 
-// تهيئة قاعدة البيانات (مع جدول الأنشطة)
+// تهيئة قاعدة البيانات (*** تمت إضافة جدول جديد ***)
 function initializeDatabase() {
   db.serialize(() => {
     // جدول الطلاب
@@ -68,7 +68,7 @@ function initializeDatabase() {
       )
     `);
 
-    // (جديد: جدول سجل الأنشطة)
+    // (*** جديد: جدول سجل الأنشطة ***)
     db.run(`
       CREATE TABLE IF NOT EXISTS activity_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -247,7 +247,6 @@ app.get('/api/admin/login-logs', (req, res) => {
   );
 });
 
-// (جديد: Endpoint لتسجيل الأنشطة)
 // 11. تسجيل نشاط
 app.post('/api/log-activity', (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
@@ -258,15 +257,12 @@ app.post('/api/log-activity', (req, res) => {
         'INSERT INTO activity_logs (studentId, activityType, subjectName) VALUES (?, ?, ?)',
         [studentId, activityType, subjectName || null],
         function(err) {
-            if (err) {
-                return res.status(500).json({ error: 'خطأ في تسجيل النشاط' });
-            }
+            if (err) return res.status(500).json({ error: 'خطأ في تسجيل النشاط' });
             res.json({ id: this.lastID, message: 'تم تسجيل النشاط بنجاح' });
         }
     );
 });
 
-// (جديد: Endpoint لجلب الأنشطة للإدارة)
 // 12. جلب سجلات الأنشطة (للإدارة)
 app.get('/api/admin/activity-logs', (req, res) => {
     db.all(
@@ -275,9 +271,7 @@ app.get('/api/admin/activity-logs', (req, res) => {
         JOIN students s ON act.studentId = s.id
         ORDER BY act.timestamp DESC`,
         (err, logs) => {
-            if (err) {
-                return res.status(500).json({ error: 'خطأ في جلب سجلات الأنشطة' });
-            }
+            if (err) return res.status(500).json({ error: 'خطأ في جلب سجلات الأنشطة' });
             res.json(logs || []);
         }
     );
@@ -289,7 +283,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'الخادم يعمل بشكل صحيح' });
 });
 
-// بدء الخادم (تم تحديث قائمة الـ Endpoints)
+// بدء الخادم
 app.listen(PORT, () => {
   console.log(`\n✓ الخادم يعمل على: http://localhost:${PORT}`);
   console.log(`✓ API متاح على: http://localhost:${PORT}/api`);
