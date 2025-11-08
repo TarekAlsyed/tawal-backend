@@ -9,7 +9,14 @@ const app = express();
 const PORT = 3001;
 
 // Middleware
-app.use(cors());
+// (*** تعديل CORS للسماح بموقعك ***)
+const corsOptions = {
+  origin: 'https://tarekalcyed.github.io',
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+// (*** نهاية التعديل ***)
+
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
