@@ -9,13 +9,12 @@ const app = express();
 const PORT = 3001;
 
 // Middleware
-// (*** تعديل CORS للسماح بالرابط الصحيح ***)
+// (تعديل CORS للسماح بالرابط الصحيح)
 const corsOptions = {
-  origin: 'https://tarekalsyed.github.io',
+  origin: 'https://tarekalcyed.github.io',
   optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
-// (*** نهاية التعديل ***)
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -30,7 +29,7 @@ const db = new sqlite3.Database('./tawal_academy.db', (err) => {
   }
 });
 
-// تهيئة قاعدة البيانات
+// تهيئة قاعدة البيانات (*** تمت إضافة جدول جديد ***)
 function initializeDatabase() {
   db.serialize(() => {
     // جدول الطلاب
@@ -68,7 +67,19 @@ function initializeDatabase() {
       )
     `);
 
-    console.log('✓ تم تهيئة جداول قاعدة البيانات');
+    // (*** جديد: جدول سجل الأنشطة ***)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS activity_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        studentId INTEGER NOT NULL,
+        activityType TEXT NOT NULL,
+        subjectName TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(studentId) REFERENCES students(id)
+      )
+    `);
+
+    console.log('✓ تم تهيئة جداول قاعدة البيانات (مع جدول الأنشطة)');
   });
 }
 
@@ -77,11 +88,9 @@ function initializeDatabase() {
 // 1. تسجيل طالب جديد
 app.post('/api/students/register', (req, res) => {
   const { name, email } = req.body;
-
   if (!name || !email) {
     return res.status(400).json({ error: 'الاسم والبريد الإلكتروني مطلوبان' });
   }
-
   db.run(
     'INSERT INTO students (name, email) VALUES (?, ?)',
     [name, email],
@@ -92,12 +101,7 @@ app.post('/api/students/register', (req, res) => {
         }
         return res.status(500).json({ error: 'خطأ في التسجيل' });
       }
-      res.json({ 
-        id: this.lastID, 
-        name, 
-        email,
-        message: 'تم التسجيل بنجاح'
-      });
+      res.json({ id: this.lastID, name, email, message: 'تم التسجيل بنجاح' });
     }
   );
 });
@@ -105,17 +109,12 @@ app.post('/api/students/register', (req, res) => {
 // 2. الحصول على بيانات الطالب
 app.get('/api/students/:id', (req, res) => {
   const { id } = req.params;
-
   db.get(
     'SELECT * FROM students WHERE id = ?',
     [id],
     (err, student) => {
-      if (err) {
-        return res.status(500).json({ error: 'خطأ في جلب البيانات' });
-      }
-      if (!student) {
-        return res.status(404).json({ error: 'الطالب غير موجود' });
-      }
+      if (err) return res.status(500).json({ error: 'خطأ في جلب البيانات' });
+      if (!student) return res.status(404).json({ error: 'الطالب غير موجود' });
       res.json(student);
     }
   );
@@ -124,22 +123,15 @@ app.get('/api/students/:id', (req, res) => {
 // 3. حفظ نتيجة اختبار
 app.post('/api/quiz-results', (req, res) => {
   const { studentId, quizName, score, totalQuestions, correctAnswers } = req.body;
-
   if (!studentId || !quizName || score === undefined) {
     return res.status(400).json({ error: 'بيانات ناقصة' });
   }
-
   db.run(
     'INSERT INTO quiz_results (studentId, quizName, score, totalQuestions, correctAnswers) VALUES (?, ?, ?, ?, ?)',
     [studentId, quizName, score, totalQuestions, correctAnswers],
     function(err) {
-      if (err) {
-        return res.status(500).json({ error: 'خطأ في حفظ النتيجة' });
-      }
-      res.json({ 
-        id: this.lastID,
-        message: 'تم حفظ النتيجة بنجاح'
-      });
+      if (err) return res.status(500).json({ error: 'خطأ في حفظ النتيجة' });
+      res.json({ id: this.lastID, message: 'تم حفظ النتيجة بنجاح' });
     }
   );
 });
@@ -147,14 +139,11 @@ app.post('/api/quiz-results', (req, res) => {
 // 4. جلب نتائج الطالب
 app.get('/api/students/:id/results', (req, res) => {
   const { id } = req.params;
-
   db.all(
     'SELECT * FROM quiz_results WHERE studentId = ? ORDER BY completedAt DESC',
     [id],
     (err, results) => {
-      if (err) {
-        return res.status(500).json({ error: 'خطأ في جلب النتائج' });
-      }
+      if (err) return res.status(500).json({ error: 'خطأ في جلب النتائج' });
       res.json(results || []);
     }
   );
@@ -163,37 +152,19 @@ app.get('/api/students/:id/results', (req, res) => {
 // 5. جلب إحصائيات الطالب
 app.get('/api/students/:id/stats', (req, res) => {
   const { id } = req.params;
-
   db.all(
     'SELECT * FROM quiz_results WHERE studentId = ?',
     [id],
     (err, results) => {
-      if (err) {
-        return res.status(500).json({ error: 'خطأ في جلب الإحصائيات' });
-      }
-
+      if (err) return res.status(500).json({ error: 'خطأ في جلب الإحصائيات' });
       if (!results || results.length === 0) {
-        return res.json({
-          totalQuizzes: 0,
-          averageScore: 0,
-          bestScore: 0,
-          totalCorrect: 0
-        });
+        return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0, totalCorrect: 0 });
       }
-
       const totalQuizzes = results.length;
-      const averageScore = Math.round(
-        results.reduce((sum, r) => sum + r.score, 0) / totalQuizzes
-      );
+      const averageScore = Math.round(results.reduce((sum, r) => sum + r.score, 0) / totalQuizzes);
       const bestScore = Math.max(...results.map(r => r.score));
       const totalCorrect = results.reduce((sum, r) => sum + r.correctAnswers, 0);
-
-      res.json({
-        totalQuizzes,
-        averageScore,
-        bestScore,
-        totalCorrect
-      });
+      res.json({ totalQuizzes, averageScore, bestScore, totalCorrect });
     }
   );
 });
@@ -203,9 +174,7 @@ app.get('/api/admin/students', (req, res) => {
   db.all(
     'SELECT * FROM students ORDER BY createdAt DESC',
     (err, students) => {
-      if (err) {
-        return res.status(500).json({ error: 'خطأ في جلب الطلاب' });
-      }
+      if (err) return res.status(500).json({ error: 'خطأ في جلب الطلاب' });
       res.json(students || []);
     }
   );
@@ -216,17 +185,11 @@ app.get('/api/admin/stats', (req, res) => {
   db.get(
     'SELECT COUNT(*) as totalStudents FROM students',
     (err, studentCount) => {
-      if (err) {
-        return res.status(500).json({ error: 'خطأ' });
-      }
-
+      if (err) return res.status(500).json({ error: 'خطأ' });
       db.get(
         'SELECT COUNT(*) as totalQuizzes, AVG(score) as averageScore FROM quiz_results',
         (err, quizStats) => {
-          if (err) {
-            return res.status(500).json({ error: 'خطأ' });
-          }
-
+          if (err) return res.status(500).json({ error: 'خطأ' });
           res.json({
             totalStudents: studentCount?.totalStudents || 0,
             totalQuizzes: quizStats?.totalQuizzes || 0,
@@ -241,22 +204,15 @@ app.get('/api/admin/stats', (req, res) => {
 // 8. تسجيل دخول الطالب
 app.post('/api/login', (req, res) => {
   const { studentId } = req.body;
-
   if (!studentId) {
     return res.status(400).json({ error: 'معرف الطالب مطلوب' });
   }
-
   db.run(
     'INSERT INTO login_logs (studentId) VALUES (?)',
     [studentId],
     function(err) {
-      if (err) {
-        return res.status(500).json({ error: 'خطأ في تسجيل الدخول' });
-      }
-      res.json({ 
-        logId: this.lastID,
-        message: 'تم تسجيل الدخول'
-      });
+      if (err) return res.status(500).json({ error: 'خطأ في تسجيل الدخول' });
+      res.json({ logId: this.lastID, message: 'تم تسجيل الدخول' });
     }
   );
 });
@@ -264,18 +220,14 @@ app.post('/api/login', (req, res) => {
 // 9. تسجيل خروج الطالب
 app.post('/api/logout', (req, res) => {
   const { logId } = req.body;
-
   if (!logId) {
     return res.status(400).json({ error: 'معرف السجل مطلوب' });
   }
-
   db.run(
     'UPDATE login_logs SET logoutTime = CURRENT_TIMESTAMP WHERE id = ?',
     [logId],
     function(err) {
-      if (err) {
-        return res.status(500).json({ error: 'خطأ في تسجيل الخروج' });
-      }
+      if (err) return res.status(500).json({ error: 'خطأ في تسجيل الخروج' });
       res.json({ message: 'تم تسجيل الخروج' });
     }
   );
@@ -284,30 +236,61 @@ app.post('/api/logout', (req, res) => {
 // 10. جلب سجلات الدخول والخروج (للإدارة)
 app.get('/api/admin/login-logs', (req, res) => {
   db.all(
-    `SELECT 
-      ll.id, 
-      s.name, 
-      s.email, 
-      ll.loginTime, 
-      ll.logoutTime 
-    FROM login_logs ll
-    JOIN students s ON ll.studentId = s.id
+    `SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime 
+    FROM login_logs ll JOIN students s ON ll.studentId = s.id
     ORDER BY ll.loginTime DESC`,
     (err, logs) => {
-      if (err) {
-        return res.status(500).json({ error: 'خطأ في جلب السجلات' });
-      }
+      if (err) return res.status(500).json({ error: 'خطأ في جلب السجلات' });
       res.json(logs || []);
     }
   );
 });
+
+// (*** جديد: Endpoint لتسجيل الأنشطة ***)
+// 11. تسجيل نشاط
+app.post('/api/log-activity', (req, res) => {
+    const { studentId, activityType, subjectName } = req.body;
+
+    if (!studentId || !activityType) {
+        return res.status(400).json({ error: 'بيانات ناقصة' });
+    }
+
+    db.run(
+        'INSERT INTO activity_logs (studentId, activityType, subjectName) VALUES (?, ?, ?)',
+        [studentId, activityType, subjectName || null],
+        function(err) {
+            if (err) {
+                return res.status(500).json({ error: 'خطأ في تسجيل النشاط' });
+            }
+            res.json({ id: this.lastID, message: 'تم تسجيل النشاط بنجاح' });
+        }
+    );
+});
+
+// (*** جديد: Endpoint لجلب الأنشطة للإدارة ***)
+// 12. جلب سجلات الأنشطة (للإدارة)
+app.get('/api/admin/activity-logs', (req, res) => {
+    db.all(
+        `SELECT act.id, s.name, act.activityType, act.subjectName, act.timestamp
+        FROM activity_logs act
+        JOIN students s ON act.studentId = s.id
+        ORDER BY act.timestamp DESC`,
+        (err, logs) => {
+            if (err) {
+                return res.status(500).json({ error: 'خطأ في جلب سجلات الأنشطة' });
+            }
+            res.json(logs || []);
+        }
+    );
+});
+
 
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'الخادم يعمل بشكل صحيح' });
 });
 
-// بدء الخادم
+// بدء الخادم (*** تم تحديث قائمة الـ Endpoints ***)
 app.listen(PORT, () => {
   console.log(`\n✓ الخادم يعمل على: http://localhost:${PORT}`);
   console.log(`✓ API متاح على: http://localhost:${PORT}/api`);
@@ -319,9 +302,11 @@ app.listen(PORT, () => {
   console.log('  GET    /api/students/:id/stats - جلب إحصائيات الطالب');
   console.log('  POST   /api/login - تسجيل دخول');
   console.log('  POST   /api/logout - تسجيل خروج');
+  console.log('  POST   /api/log-activity - (جديد) تسجيل نشاط الطالب');
   console.log('  GET    /api/admin/students - جميع الطلاب (إدارة)');
   console.log('  GET    /api/admin/stats - إحصائيات عامة (إدارة)');
   console.log('  GET    /api/admin/login-logs - سجلات الدخول (إدارة)');
+  console.log('  GET    /api/admin/activity-logs - (جديد) سجلات الأنشطة (إدارة)');
   console.log('  GET    /api/health - فحص صحة الخادم\n');
 });
 
