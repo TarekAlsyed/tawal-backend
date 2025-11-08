@@ -11,7 +11,7 @@ const PORT = 3001;
 // Middleware
 // (*** تعديل CORS للسماح بالرابط الصحيح ***)
 const corsOptions = {
-  origin: 'https://tarekalsyed.github.io',
+  origin: 'https://tarekalcyed.github.io',
   optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
