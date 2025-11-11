@@ -1,115 +1,110 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const sqlite3 = require('sqlite3').verbose();
-const fs = require('fs');
-const path = require('path');
+const { Pool } = require('pg'); // (جديد) استبدال sqlite3 بـ pg
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001; // (تعديل) استخدام البورت الافتراضي من Railway
 
 // Middleware
-// (*** تعديل CORS للسماح بالرابط الصحيح ***)
 const corsOptions = {
-  // (*** تعديل Gemini: أضف الرابط المحلي للاختبار ***)
-  origin: ['https://tarekalsyed.github.io', 'http://127.0.0.1:5500'],
+  origin: ['https://tarekalsyed.github.io', 'http://127.0.0.1:5500'], // (تعديل) إضافة الرابط المحلي
   optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
-// (*** نهاية التعديل ***)
-
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// (جديد) دالة للتحقق من أن الإيميل يبدو صحيحاً
+// (جديد) دوال الفلترة
 function validateEmail(email) {
   const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return re.test(String(email).toLowerCase());
 }
-
-// (جديد) قائمة الكلمات الممنوعة (أضف الكلمات التي تريدها)
-const BANNED_WORDS = ['كلمة_سيئة', 'لفظ_خارج', 'شتيمة'];
-
-// (جديد) دالة لفحص النص
+const BANNED_WORDS = ['كلمة_سيئة', 'لفظ_خارج', 'شتيمة']; // أضف كلماتك هنا
 function containsBannedWord(text) {
   if (!text) return false;
   const lowerCaseText = text.toLowerCase();
   return BANNED_WORDS.some(word => lowerCaseText.includes(word.toLowerCase()));
 }
 
+// (*** بداية التعديل: نقل الـ Health Check فوق ***)
+// 14. Health check
+// هذا الرابط يجب أن يكون أول رابط للرد بسرعة على Railway
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'OK', message: 'الخادم يعمل بشكل صحيح' });
+});
+// (*** نهاية التعديل ***)
 
-// إنشاء قاعدة البيانات
-const db = new sqlite3.Database('./tawal_academy.db', (err) => {
-  if (err) {
-    console.error('خطأ في الاتصال بقاعدة البيانات:', err);
-  } else {
-    console.log('✓ تم الاتصال بقاعدة البيانات بنجاح');
-    initializeDatabase();
+
+// (جديد) الاتصال بقاعدة بيانات PostgreSQL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL, // قراءة الرابط من المتغير السري
+  ssl: {
+    rejectUnauthorized: false // مطلوب للاتصال بـ Railway
   }
 });
 
-// تهيئة قاعدة البيانات (*** تمت إضافة جدول جديد ***)
-function initializeDatabase() {
-  db.serialize(() => {
-    // جدول الطلاب
-    db.run(`
+// (جديد) تهيئة قاعدة البيانات (بصيغة PostgreSQL)
+async function initializeDatabase() {
+  try {
+    // (تعديل) Sintax الـ SQL الخاص بـ PostgreSQL
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS students (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
         email TEXT UNIQUE,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        isBanned INTEGER DEFAULT 0  -- (*** السطر الجديد لإضافة خاصية الحظر ***)
+        createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        isBanned INTEGER DEFAULT 0
       )
     `);
 
-    // جدول نتائج الاختبارات
-    db.run(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS quiz_results (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         studentId INTEGER NOT NULL,
         quizName TEXT NOT NULL,
         score INTEGER NOT NULL,
         totalQuestions INTEGER NOT NULL,
         correctAnswers INTEGER NOT NULL,
-        completedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        completedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(studentId) REFERENCES students(id)
       )
     `);
 
-    // جدول تتبع الدخول
-    db.run(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS login_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         studentId INTEGER NOT NULL,
-        loginTime DATETIME DEFAULT CURRENT_TIMESTAMP,
-        logoutTime DATETIME,
+        loginTime TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        logoutTime TIMESTAMPTZ,
         FOREIGN KEY(studentId) REFERENCES students(id)
       )
     `);
 
-    // (*** جديد: جدول سجل الأنشطة ***)
-    db.run(`
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS activity_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         studentId INTEGER NOT NULL,
         activityType TEXT NOT NULL,
         subjectName TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(studentId) REFERENCES students(id)
       )
     `);
-
-    console.log('✓ تم تهيئة جداول قاعدة البيانات (مع جدول الأنشطة والحظر)');
-  });
+    
+    console.log('✓ تم تهيئة جداول PostgreSQL بنجاح');
+  } catch (err) {
+    console.error('خطأ في تهيئة قاعدة البيانات:', err);
+  }
 }
 
-// ============ API Endpoints ============
+// ============ API Endpoints (محولة إلى PostgreSQL) ============
 
-// 1. تسجيل طالب جديد (نسخة معدلة مع فلترة وحظر)
-app.post('/api/students/register', (req, res) => {
+// 1. تسجيل طالب جديد (async/await)
+app.post('/api/students/register', async (req, res) => {
   const { name, email } = req.body;
-  
-  // --- (بداية الفلترة) ---
+
+  // --- الفلترة ---
   if (!name || !email) {
     return res.status(400).json({ error: 'الاسم والبريد الإلكتروني مطلوبان' });
   }
@@ -119,236 +114,225 @@ app.post('/api/students/register', (req, res) => {
   if (!validateEmail(email)) {
     return res.status(400).json({ error: 'الرجاء إدخال بريد إلكتروني صالح.' });
   }
-  // --- (نهاية الفلترة) ---
+  // --- نهاية الفلترة ---
 
-  // محاولة تسجيل الطالب الجديد
-  db.run(
-    'INSERT INTO students (name, email) VALUES (?, ?)',
-    [name, email],
-    function(err) {
-      if (err) {
-        if (err.message.includes('UNIQUE')) {
-          // --- (بداية التحقق من الحظر للمستخدم العائد) ---
-          // إذا كان البريد مسجلاً بالفعل، تحقق إذا كان محظوراً
-          db.get('SELECT * FROM students WHERE email = ?', [email], (err, student) => {
-            if (err) return res.status(500).json({ error: 'خطأ في جلب بيانات الطالب' });
-            if (!student) return res.status(400).json({ error: 'خطأ، البريد مسجل ولكن لا يمكن إيجاده' });
+  try {
+    // محاولة تسجيل الطالب
+    const newUser = await pool.query(
+      'INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *',
+      [name, email]
+    );
+    res.json({ id: newUser.rows[0].id, name, email, message: 'تم التسجيل بنجاح' });
 
-            if (student.isBanned === 1) {
-              // (*** هذا هو كود الحظر المطلوب ***)
-              return res.status(403).json({ error: 'هذا الحساب محظور. لا يمكنك الدخول.' });
-            }
+  } catch (err) {
+    if (err.code === '23505') { // 23505 هو كود الخطأ "UNIQUE constraint"
+      // --- التحقق من الحظر للمستخدم العائد ---
+      try {
+        const { rows } = await pool.query('SELECT * FROM students WHERE email = $1', [email]);
+        const student = rows[0];
 
-            // إذا لم يكن محظوراً، أرسل بياناته للترحيب به
-            res.json({ id: student.id, name: student.name, email: student.email, message: 'أهلاً بعودتك!' });
-          });
-          // --- (نهاية التحقق من الحظر) ---
-        } else {
-          return res.status(500).json({ error: 'خطأ في التسجيل' });
+        // لاحظ أن pg يحول الأسماء إلى lowercase (isbanned)
+        if (student && student.isbanned === 1) { 
+          return res.status(403).json({ error: 'هذا الحساب محظور. لا يمكنك الدخول.' });
         }
-      } else {
-        // نجح التسجيل (طالب جديد)
-        res.json({ id: this.lastID, name, email, message: 'تم التسجيل بنجاح' });
+        res.json({ id: student.id, name: student.name, email: student.email, message: 'أهلاً بعودتك!' });
+      } catch (dbErr) {
+        res.status(500).json({ error: 'خطأ في جلب بيانات الطالب' });
       }
+      // --- نهاية التحقق من الحظر ---
+    } else {
+      res.status(500).json({ error: 'خطأ في التسجيل' });
     }
-  );
+  }
 });
 
-
 // 2. الحصول على بيانات الطالب
-app.get('/api/students/:id', (req, res) => {
+app.get('/api/students/:id', async (req, res) => {
   const { id } = req.params;
-  db.get(
-    'SELECT * FROM students WHERE id = ?',
-    [id],
-    (err, student) => {
-      if (err) return res.status(500).json({ error: 'خطأ في جلب البيانات' });
-      if (!student) return res.status(404).json({ error: 'الطالب غير موجود' });
-      res.json(student);
-    }
-  );
+  try {
+    const { rows } = await pool.query('SELECT * FROM students WHERE id = $1', [id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'الطالب غير موجود' });
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في جلب البيانات' });
+  }
 });
 
 // 3. حفظ نتيجة اختبار
-app.post('/api/quiz-results', (req, res) => {
+app.post('/api/quiz-results', async (req, res) => {
   const { studentId, quizName, score, totalQuestions, correctAnswers } = req.body;
   if (!studentId || !quizName || score === undefined) {
     return res.status(400).json({ error: 'بيانات ناقصة' });
   }
-  db.run(
-    'INSERT INTO quiz_results (studentId, quizName, score, totalQuestions, correctAnswers) VALUES (?, ?, ?, ?, ?)',
-    [studentId, quizName, score, totalQuestions, correctAnswers],
-    function(err) {
-      if (err) return res.status(500).json({ error: 'خطأ في حفظ النتيجة' });
-      res.json({ id: this.lastID, message: 'تم حفظ النتيجة بنجاح' });
-    }
-  );
+  try {
+    await pool.query(
+      'INSERT INTO quiz_results (studentId, quizName, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5)',
+      [studentId, quizName, score, totalQuestions, correctAnswers]
+    );
+    res.json({ message: 'تم حفظ النتيجة بنجاح' });
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في حفظ النتيجة' });
+  }
 });
 
 // 4. جلب نتائج الطالب
-app.get('/api/students/:id/results', (req, res) => {
+app.get('/api/students/:id/results', async (req, res) => {
   const { id } = req.params;
-  db.all(
-    'SELECT * FROM quiz_results WHERE studentId = ? ORDER BY completedAt DESC',
-    [id],
-    (err, results) => {
-      if (err) return res.status(500).json({ error: 'خطأ في جلب النتائج' });
-      res.json(results || []);
-    }
-  );
+  try {
+    const { rows } = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1 ORDER BY completedAt DESC', [id]);
+    res.json(rows || []);
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في جلب النتائج' });
+  }
 });
 
 // 5. جلب إحصائيات الطالب
-app.get('/api/students/:id/stats', (req, res) => {
+app.get('/api/students/:id/stats', async (req, res) => {
   const { id } = req.params;
-  db.all(
-    'SELECT * FROM quiz_results WHERE studentId = ?',
-    [id],
-    (err, results) => {
-      if (err) return res.status(500).json({ error: 'خطأ في جلب الإحصائيات' });
-      if (!results || results.length === 0) {
-        return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0, totalCorrect: 0 });
-      }
-      const totalQuizzes = results.length;
-      const averageScore = Math.round(results.reduce((sum, r) => sum + r.score, 0) / totalQuizzes);
-      const bestScore = Math.max(...results.map(r => r.score));
-      const totalCorrect = results.reduce((sum, r) => sum + r.correctAnswers, 0);
-      res.json({ totalQuizzes, averageScore, bestScore, totalCorrect });
+  try {
+    const { rows } = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1', [id]);
+    const results = rows || [];
+    if (results.length === 0) {
+      return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0, totalCorrect: 0 });
     }
-  );
+    const totalQuizzes = results.length;
+    const averageScore = Math.round(results.reduce((sum, r) => sum + r.score, 0) / totalQuizzes);
+    const bestScore = Math.max(...results.map(r => r.score));
+    const totalCorrect = results.reduce((sum, r) => sum + r.correctanswers, 0); // (تعديل) postgres يحول لـ lowercase
+    res.json({ totalQuizzes, averageScore, bestScore, totalCorrect });
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في جلب الإحصائيات' });
+  }
 });
 
 // 6. جلب جميع الطلاب (للإدارة)
-app.get('/api/admin/students', (req, res) => {
-  db.all(
-    'SELECT * FROM students ORDER BY createdAt DESC',
-    (err, students) => {
-      if (err) return res.status(500).json({ error: 'خطأ في جلب الطلاب' });
-      res.json(students || []);
-    }
-  );
+app.get('/api/admin/students', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id, name, email, createdAt, isBanned FROM students ORDER BY createdAt DESC'); // (تعديل) جلب حالة الحظر
+    res.json(rows || []);
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في جلب الطلاب' });
+  }
 });
 
 // 7. جلب إحصائيات عامة (للإدارة)
-app.get('/api/admin/stats', (req, res) => {
-  db.get(
-    'SELECT COUNT(*) as totalStudents FROM students',
-    (err, studentCount) => {
-      if (err) return res.status(500).json({ error: 'خطأ' });
-      db.get(
-        'SELECT COUNT(*) as totalQuizzes, AVG(score) as averageScore FROM quiz_results',
-        (err, quizStats) => {
-          if (err) return res.status(500).json({ error: 'خطأ' });
-          res.json({
-            totalStudents: studentCount?.totalStudents || 0,
-            totalQuizzes: quizStats?.totalQuizzes || 0,
-            averageScore: Math.round(quizStats?.averageScore || 0)
-          });
-        }
-      );
-    }
-  );
+app.get('/api/admin/stats', async (req, res) => {
+  try {
+    const studentCountResult = await pool.query('SELECT COUNT(*) as totalStudents FROM students');
+    const quizStatsResult = await pool.query('SELECT COUNT(*) as totalQuizzes, AVG(score) as averageScore FROM quiz_results');
+    
+    res.json({
+      totalStudents: parseInt(studentCountResult.rows[0].totalstudents) || 0, // (تعديل) postgres يحول لـ lowercase
+      totalQuizzes: parseInt(quizStatsResult.rows[0].totalquizzes) || 0, // (تعديل) postgres يحول لـ lowercase
+      averageScore: Math.round(quizStatsResult.rows[0].averagescore || 0) // (تعديل) postgres يحول لـ lowercase
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ' });
+  }
 });
 
 // 8. تسجيل دخول الطالب
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { studentId } = req.body;
   if (!studentId) {
     return res.status(400).json({ error: 'معرف الطالب مطلوب' });
   }
-  db.run(
-    'INSERT INTO login_logs (studentId) VALUES (?)',
-    [studentId],
-    function(err) {
-      if (err) return res.status(500).json({ error: 'خطأ في تسجيل الدخول' });
-      res.json({ logId: this.lastID, message: 'تم تسجيل الدخول' });
-    }
-  );
+  try {
+    const { rows } = await pool.query('INSERT INTO login_logs (studentId) VALUES ($1) RETURNING id', [studentId]);
+    res.json({ logId: rows[0].id, message: 'تم تسجيل الدخول' });
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في تسجيل الدخول' });
+  }
 });
 
 // 9. تسجيل خروج الطالب
-app.post('/api/logout', (req, res) => {
+app.post('/api/logout', async (req, res) => {
   const { logId } = req.body;
   if (!logId) {
     return res.status(400).json({ error: 'معرف السجل مطلوب' });
   }
-  db.run(
-    'UPDATE login_logs SET logoutTime = CURRENT_TIMESTAMP WHERE id = ?',
-    [logId],
-    function(err) {
-      if (err) return res.status(500).json({ error: 'خطأ في تسجيل الخروج' });
-      res.json({ message: 'تم تسجيل الخروج' });
-    }
-  );
+  try {
+    await pool.query(
+        'UPDATE login_logs SET logoutTime = CURRENT_TIMESTAMP WHERE id = $1',
+        [logId]
+    );
+    res.json({ message: 'تم تسجيل الخروج' });
+  } catch (err) {
+     res.status(500).json({ error: 'خطأ في تسجيل الخروج' });
+  }
 });
 
 // 10. جلب سجلات الدخول والخروج (للإدارة)
-app.get('/api/admin/login-logs', (req, res) => {
-  db.all(
-    `SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime 
-    FROM login_logs ll JOIN students s ON ll.studentId = s.id
-    ORDER BY ll.loginTime DESC`,
-    (err, logs) => {
-      if (err) return res.status(500).json({ error: 'خطأ في جلب السجلات' });
-      res.json(logs || []);
-    }
-  );
+app.get('/api/admin/login-logs', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime 
+      FROM login_logs ll JOIN students s ON ll.studentId = s.id
+      ORDER BY ll.loginTime DESC`
+    );
+    res.json(rows || []);
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في جلب السجلات' });
+  }
 });
 
 // 11. تسجيل نشاط
-app.post('/api/log-activity', (req, res) => {
-    const { studentId, activityType, subjectName } = req.body;
-    if (!studentId || !activityType) {
-        return res.status(400).json({ error: 'بيانات ناقصة' });
-    }
-    db.run(
-        'INSERT INTO activity_logs (studentId, activityType, subjectName) VALUES (?, ?, ?)',
-        [studentId, activityType, subjectName || null],
-        function(err) {
-            if (err) return res.status(500).json({ error: 'خطأ في تسجيل النشاط' });
-            res.json({ id: this.lastID, message: 'تم تسجيل النشاط بنجاح' });
-        }
+app.post('/api/log-activity', async (req, res) => {
+  const { studentId, activityType, subjectName } = req.body;
+  if (!studentId || !activityType) {
+    return res.status(400).json({ error: 'بيانات ناقصة' });
+  }
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO activity_logs (studentId, activityType, subjectName) VALUES ($1, $2, $3) RETURNING id',
+      [studentId, activityType || null, subjectName || null]
     );
+    res.json({ id: rows[0].id, message: 'تم تسجيل النشاط بنجاح' });
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في تسجيل النشاط' });
+  }
 });
 
 // 12. جلب سجلات الأنشطة (للإدارة)
-app.get('/api/admin/activity-logs', (req, res) => {
-    db.all(
+app.get('/api/admin/activity-logs', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
         `SELECT act.id, s.name, act.activityType, act.subjectName, act.timestamp
         FROM activity_logs act
         JOIN students s ON act.studentId = s.id
-        ORDER BY act.timestamp DESC`,
-        (err, logs) => {
-            if (err) return res.status(500).json({ error: 'خطأ في جلب سجلات الأنشطة' });
-            res.json(logs || []);
-        }
+        ORDER BY act.timestamp DESC`
     );
+    res.json(rows || []);
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في جلب سجلات الأنشطة' });
+  }
 });
 
-// (*** جديد: Endpoint لحظر/فك حظر الطالب ***)
-app.post('/api/admin/ban', (req, res) => {
-    const { studentId, status } = req.body; // status يمكن أن تكون 1 (حظر) أو 0 (فك الحظر)
+// 13. حظر/فك حظر الطالب
+app.post('/api/admin/ban', async (req, res) => {
+    const { studentId, status } = req.body;
     if (studentId === undefined) {
         return res.status(400).json({ error: 'معرف الطالب مطلوب' });
     }
-    db.run(
-        'UPDATE students SET isBanned = ? WHERE id = ?',
-        [status, studentId],
-        function(err) {
-            if (err) return res.status(500).json({ error: 'خطأ في تحديث حالة الطالب' });
-            res.json({ message: 'تم تحديث حالة الطالب بنجاح' });
-        }
-    );
+    try {
+        await pool.query(
+            'UPDATE students SET isBanned = $1 WHERE id = $2',
+            [status, studentId]
+        );
+        res.json({ message: 'تم تحديث حالة الطالب بنجاح' });
+    } catch (err) {
+        res.status(500).json({ error: 'خطأ في تحديث حالة الطالب' });
+    }
 });
 
-
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'الخادم يعمل بشكل صحيح' });
+// 15. (جديد) معالج الخطأ الرئيسي للرابط "/"
+app.get('/', (req, res) => {
+    res.send('الخادم يعمل. اذهب إلى /api/health للتحقق.');
 });
 
 // بدء الخادم
 app.listen(PORT, () => {
+  initializeDatabase(); // (جديد) تأكد من إنشاء الجداول عند بدء التشغيل
   console.log(`\n✓ الخادم يعمل على: http://localhost:${PORT}`);
   console.log(`✓ API متاح على: http://localhost:${PORT}/api`);
   console.log('\n📚 الـ Endpoints المتاحة:');
@@ -368,14 +352,11 @@ app.listen(PORT, () => {
   console.log('  GET    /api/health - فحص صحة الخادم\n');
 });
 
-// معالجة الأخطاء
-process.on('SIGINT', () => {
-  db.close((err) => {
-    if (err) {
-      console.error('خطأ في إغلاق قاعدة البيانات:', err);
-    } else {
-      console.log('\n✓ تم إغلاق قاعدة البيانات');
-    }
-    process.exit(0);
-  });
+// (جديد) معالجة إغلاق الخادم
+process.on('SIGINT', async () => {
+  if (pool) {
+    await pool.end();
+  }
+  console.log('\n✓ تم إغلاق الاتصال بقاعدة البيانات');
+  process.exit(0);
 });
