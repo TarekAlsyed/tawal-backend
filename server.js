@@ -6,6 +6,9 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3001; 
 
+// (*** جديد: تفعيل الثقة في البروكسي (أساسي لحظر الـ IP) ***)
+app.set('trust proxy', 1);
+
 // Middleware
 const corsOptions = {
   origin: ['https://tarekalsyed.github.io', 'http://127.0.0.1:5500'], 
@@ -20,7 +23,7 @@ function validateEmail(email) {
   const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return re.test(String(email).toLowerCase());
 }
-const BANNED_WORDS = ['كلمة_سيئة', 'لفظ_خارج', 'شتيمة']; // أضف كلماتك هنا
+const BANNED_WORDS = ['كلمة_سيئة', 'لفظ_خارج', 'شتيمة']; 
 function containsBannedWord(text) {
   if (!text) return false;
   const lowerCaseText = text.toLowerCase();
@@ -46,10 +49,33 @@ const pool = new Pool({
   }
 });
 
-// تهيئة قاعدة البيانات (*** تمت إضافة جدول وخانة جديدة ***)
+// (*** جديد: الـ Middleware الخاص بحظر الـ IP ***)
+// هذا الكود يجب أن يكون قبل أي "Endpoint" تاني
+app.use(async (req, res, next) => {
+    // نتجاهل فحص الـ health check عشان منعملش حظر بالغلط
+    if (req.path === '/api/health') {
+        return next();
+    }
+    
+    const userIp = req.ip;
+    try {
+        const { rows } = await pool.query('SELECT * FROM banned_ips WHERE ip_address = $1', [userIp]);
+        if (rows.length > 0) {
+            // إذا كان الـ IP محظور، ارفض الطلب فوراً
+            return res.status(403).json({ error: 'الوصول مرفوض من هذا العنوان (IP).' });
+        }
+    } catch (err) {
+        // لو قاعدة البيانات لسه بتقوم، عدي الطلب عشان الخادم ميكراش
+        console.warn("IP check failed (DB might be starting up):", err.message);
+    }
+    next();
+});
+
+
+// تهيئة قاعدة البيانات (*** تمت إضافة جداول وخانات جديدة ***)
 async function initializeDatabase() {
   try {
-    // (*** تعديل: إضافة خانة بصمة الجهاز ***)
+    // 1. جدول الطلاب
     await pool.query(`
       CREATE TABLE IF NOT EXISTS students (
         id SERIAL PRIMARY KEY,
@@ -60,7 +86,7 @@ async function initializeDatabase() {
       )
     `);
     
-    // (*** جديد: إضافة جدول لبصمات الأجهزة المحظورة ***)
+    // 2. جدول بصمات الأجهزة المحظورة
     await pool.query(`
       CREATE TABLE IF NOT EXISTS banned_fingerprints (
         id SERIAL PRIMARY KEY,
@@ -68,8 +94,17 @@ async function initializeDatabase() {
         createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    
+    // (*** جديد: 3. جدول الـ IP المحظور ***)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS banned_ips (
+        id SERIAL PRIMARY KEY,
+        ip_address TEXT UNIQUE NOT NULL,
+        createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-    // باقي الجداول
+    // 4. جدول نتائج الاختبارات
     await pool.query(`
       CREATE TABLE IF NOT EXISTS quiz_results (
         id SERIAL PRIMARY KEY,
@@ -82,6 +117,8 @@ async function initializeDatabase() {
         FOREIGN KEY(studentId) REFERENCES students(id)
       )
     `);
+
+    // 5. جدول سجلات الدخول (*** معدل ليضيف الـ IP ***)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS login_logs (
         id SERIAL PRIMARY KEY,
@@ -91,6 +128,8 @@ async function initializeDatabase() {
         FOREIGN KEY(studentId) REFERENCES students(id)
       )
     `);
+    
+    // 6. جدول سجلات الأنشطة
     await pool.query(`
       CREATE TABLE IF NOT EXISTS activity_logs (
         id SERIAL PRIMARY KEY,
@@ -102,27 +141,31 @@ async function initializeDatabase() {
       )
     `);
     
-    
-    // (*** تعديل: التأكد من إضافة الخانة بشكل صريح ***)
+    // (*** تعديل: التأكد من إضافة الخانات الجديدة للجداول القديمة ***)
     try {
         await pool.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS device_fingerprint TEXT');
-        console.log('✓ عمود "device_fingerprint" أضيف بنجاح.');
+        console.log('✓ عمود "device_fingerprint" جاهز.');
     } catch (e) {
-        if (e.code === '42701') { // 42701 = column already exists
-            console.log('✓ عمود "device_fingerprint" موجود بالفعل.');
-        } else {
-            console.error('خطأ أثناء إضافة عمود "device_fingerprint":', e);
-        }
+        if (e.code !== '42701') console.error('خطأ إضافة خانة البصمة:', e);
+        else console.log('✓ عمود "device_fingerprint" موجود بالفعل.');
     }
     
-    console.log('✓ تم تهيئة جداول PostgreSQL (مع جداول الحظر المتقدم) بنجاح');
+    try {
+        await pool.query('ALTER TABLE login_logs ADD COLUMN IF NOT EXISTS ip_address TEXT');
+        console.log('✓ عمود "ip_address" جاهز.');
+    } catch (e) {
+        if (e.code !== '42701') console.error('خطأ إضافة خانة الـ IP:', e);
+        else console.log('✓ عمود "ip_address" موجود بالفعل.');
+    }
+    
+    console.log('✓ تم تهيئة جداول PostgreSQL (مع نظام الحظر المزدوج) بنجاح');
 
   } catch (err) {
     console.error('خطأ في تهيئة قاعدة البيانات:', err);
   }
 }
 
-// ============ (*** جديد: أداة فحص قاعدة البيانات ***) ============
+// ============ (أداة فحص قاعدة البيانات) ============
 app.get('/api/debug-show-all-students', async (req, res) => {
     try {
         const { rows } = await pool.query('SELECT id, name, email, isbanned, device_fingerprint FROM students ORDER BY id DESC');
@@ -136,7 +179,7 @@ app.get('/api/debug-show-all-students', async (req, res) => {
 
 // ============ API Endpoints ============
 
-// (*** جديد: نقطة نهاية "الحارس" لفحص بصمة الجهاز ***)
+// (نقطة نهاية "الحارس" لفحص بصمة الجهاز)
 app.post('/api/check-device', async (req, res) => {
     const { fingerprint } = req.body;
     if (!fingerprint) {
@@ -155,9 +198,10 @@ app.post('/api/check-device', async (req, res) => {
 });
 
 
-// 1. تسجيل طالب جديد (*** معدل ليأخذ البصمة ويتحقق منها ***)
+// 1. تسجيل طالب جديد (معدل ليأخذ البصمة ويتحقق منها)
 app.post('/api/students/register', async (req, res) => {
-  const { name, email, fingerprint } = req.body; // (*** تعديل: إضافة البصمة ***)
+  const { name, email, fingerprint } = req.body; 
+  const userIp = req.ip; // (*** جديد: تسجيل الـ IP ***)
 
   // --- الفلترة ---
   if (!name || !email || !fingerprint) {
@@ -172,7 +216,7 @@ app.post('/api/students/register', async (req, res) => {
   // --- نهاية الفلترة ---
 
   try {
-    // (*** جديد: التحقق من البصمة أولاً ***)
+    // (التحقق من البصمة أولاً)
     const { rows: bannedRows } = await pool.query('SELECT * FROM banned_fingerprints WHERE fingerprint = $1', [fingerprint]);
     if (bannedRows.length > 0) {
         return res.status(403).json({ error: 'هذا الجهاز محظور. لا يمكنك التسجيل.' });
@@ -181,9 +225,14 @@ app.post('/api/students/register', async (req, res) => {
     // محاولة تسجيل الطالب
     const newUser = await pool.query(
       'INSERT INTO students (name, email, device_fingerprint) VALUES ($1, $2, $3) RETURNING *',
-      [name, email, fingerprint] // (*** تعديل: إضافة البصمة ***)
+      [name, email, fingerprint] 
     );
-    res.json({ id: newUser.rows[0].id, name, email, message: 'تم التسجيل بنجاح' });
+    
+    // (*** جديد: تسجيل الـ IP عند أول تسجيل ***)
+    const newStudentId = newUser.rows[0].id;
+    await pool.query('INSERT INTO login_logs (studentId, ip_address) VALUES ($1, $2)', [newStudentId, userIp]);
+
+    res.json({ id: newStudentId, name, email, message: 'تم التسجيل بنجاح' });
 
   } catch (err) {
     if (err.code === '23505') { // الإيميل مسجل من قبل
@@ -195,8 +244,10 @@ app.post('/api/students/register', async (req, res) => {
           return res.status(403).json({ error: 'هذا الحساب محظور. لا يمكنك الدخول.' });
         }
         
-        // (*** جديد: تحديث البصمة للمستخدم العائد ***)
+        // (تحديث البصمة والـ IP للمستخدم العائد)
         await pool.query('UPDATE students SET device_fingerprint = $1 WHERE id = $2', [fingerprint, student.id]);
+        await pool.query('INSERT INTO login_logs (studentId, ip_address) VALUES ($1, $2)', [student.id, userIp]);
+
 
         res.json({ id: student.id, name: student.name, email: student.email, message: 'أهلاً بعودتك!' });
       } catch (dbErr) {
@@ -208,7 +259,7 @@ app.post('/api/students/register', async (req, res) => {
   }
 });
 
-// 2. الحصول على بيانات الطالب (*** معدل ليشمل حالة الحظر ***)
+// 2. الحصول على بيانات الطالب (معدل ليشمل حالة الحظر)
 app.get('/api/students/:id', async (req, res) => {
   const { id } = req.params;
   try {
@@ -220,7 +271,7 @@ app.get('/api/students/:id', async (req, res) => {
   }
 });
 
-// 13. حظر/فك حظر الطالب (*** معدل ليقوم بحظر البصمة أيضاً ***)
+// 13. حظر/فك حظر الطالب (*** معدل ليقوم بحظر البصمة والـ IP ***)
 app.post('/api/admin/ban', async (req, res) => {
     const { studentId, status } = req.body;
     if (studentId === undefined) {
@@ -228,7 +279,7 @@ app.post('/api/admin/ban', async (req, res) => {
     }
     try {
         if (status === 1) { // إذا كان الأمر "حظر"
-            // 1. احظر الحساب وهات البصمة بتاعته
+            // 1. احظر الحساب وهات البصمة
             const { rows } = await pool.query(
                 'UPDATE students SET isBanned = 1 WHERE id = $1 RETURNING device_fingerprint',
                 [studentId]
@@ -237,14 +288,27 @@ app.post('/api/admin/ban', async (req, res) => {
             // 2. ضيف البصمة لجدول الحظر
             const fingerprint = rows[0]?.device_fingerprint;
             if (fingerprint) {
-                // "ON CONFLICT" عشان لو البصمة موجودة قبل كده ميعملش إيرور
                 await pool.query(
                     'INSERT INTO banned_fingerprints (fingerprint) VALUES ($1) ON CONFLICT (fingerprint) DO NOTHING',
                     [fingerprint]
                 );
             }
+            
+            // (*** جديد: 3. هات آخر IP للطالب وضيفه لجدول الحظر ***)
+            const { rows: logRows } = await pool.query(
+                'SELECT ip_address FROM login_logs WHERE studentId = $1 AND ip_address IS NOT NULL ORDER BY loginTime DESC LIMIT 1',
+                [studentId]
+            );
+            const lastIp = logRows[0]?.ip_address;
+            if (lastIp) {
+                await pool.query(
+                    'INSERT INTO banned_ips (ip_address) VALUES ($1) ON CONFLICT (ip_address) DO NOTHING',
+                    [lastIp]
+                );
+            }
+
         } else { // إذا كان الأمر "فك الحظر"
-             // (ملاحظة: إحنا بنفك حظر الحساب بس، مش البصمة. البصمة تفضل محظورة)
+             // (ملاحظة: بنفك حظر الحساب بس. البصمة والـ IP يفضلوا محظورين كعقاب)
             await pool.query(
                 'UPDATE students SET isBanned = 0 WHERE id = $1',
                 [studentId]
@@ -257,8 +321,28 @@ app.post('/api/admin/ban', async (req, res) => {
 });
 
 
+// 8. تسجيل دخول الطالب (*** معدل ليسجل الـ IP ***)
+app.post('/api/login', async (req, res) => {
+  const { studentId } = req.body;
+  const userIp = req.ip; // (*** جديد: تسجيل الـ IP ***)
+  
+  if (!studentId) {
+    return res.status(400).json({ error: 'معرف الطالب مطلوب' });
+  }
+  try {
+    const { rows } = await pool.query(
+        'INSERT INTO login_logs (studentId, ip_address) VALUES ($1, $2) RETURNING id', 
+        [studentId, userIp]
+    );
+    res.json({ logId: rows[0].id, message: 'تم تسجيل الدخول' });
+  } catch (err) {
+    res.status(500).json({ error: 'خطأ في تسجيل الدخول' });
+  }
+});
+
+
 // (باقي الـ Endpoints كما هي بدون تعديل...)
-// ... (الكود من 3 إلى 12) ...
+// ...
 
 // 3. حفظ نتيجة اختبار
 app.post('/api/quiz-results', async (req, res) => {
@@ -333,20 +417,6 @@ app.get('/api/admin/stats', async (req, res) => {
   }
 });
 
-// 8. تسجيل دخول الطالب
-app.post('/api/login', async (req, res) => {
-  const { studentId } = req.body;
-  if (!studentId) {
-    return res.status(400).json({ error: 'معرف الطالب مطلوب' });
-  }
-  try {
-    const { rows } = await pool.query('INSERT INTO login_logs (studentId) VALUES ($1) RETURNING id', [studentId]);
-    res.json({ logId: rows[0].id, message: 'تم تسجيل الدخول' });
-  } catch (err) {
-    res.status(500).json({ error: 'خطأ في تسجيل الدخول' });
-  }
-});
-
 // 9. تسجيل خروج الطالب
 app.post('/api/logout', async (req, res) => {
   const { logId } = req.body;
@@ -368,9 +438,9 @@ app.post('/api/logout', async (req, res) => {
 app.get('/api/admin/login-logs', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime 
+      `SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime, ll.ip_address 
       FROM login_logs ll JOIN students s ON ll.studentId = s.id
-      ORDER BY ll.loginTime DESC`
+      ORDER BY ll.loginTime DESC` // (*** تعديل: جلب الـ IP ***)
     );
     res.json(rows || []);
   } catch (err) {
