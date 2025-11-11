@@ -2,7 +2,7 @@
   "name": "tawal_backend",
   "version": "1.0.0",
   "main": "server.js",
-  "description": "Tawal Academy - Backend API",
+  "description": "Tawal Academy - Backend API (PostgreSQL)",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
@@ -20,6 +20,6 @@
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "sqlite3": "^5.1.7"
+    "pg": "^8.12.0"
   }
 }
