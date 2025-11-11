@@ -20,7 +20,7 @@ function validateEmail(email) {
   const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return re.test(String(email).toLowerCase());
 }
-const BANNED_WORDS = ['كلمة_سيئة', 'لفظ_خارج', 'شتيمة']; 
+const BANNED_WORDS = ['كلمة_سيئة', 'لفظ_خارج', 'شتيمة']; // أضف كلماتك هنا
 function containsBannedWord(text) {
   if (!text) return false;
   const lowerCaseText = text.toLowerCase();
@@ -105,7 +105,7 @@ async function initializeDatabase() {
     
     // (*** تعديل: التأكد من إضافة الخانة بشكل صريح ***)
     try {
-        await pool.query('ALTER TABLE students ADD COLUMN device_fingerprint TEXT');
+        await pool.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS device_fingerprint TEXT');
         console.log('✓ عمود "device_fingerprint" أضيف بنجاح.');
     } catch (e) {
         if (e.code === '42701') { // 42701 = column already exists
@@ -123,16 +123,12 @@ async function initializeDatabase() {
 }
 
 // ============ (*** جديد: أداة فحص قاعدة البيانات ***) ============
-app.get('/api/debug-schema', async (req, res) => {
+app.get('/api/debug-show-all-students', async (req, res) => {
     try {
-        const { rows } = await pool.query(`
-            SELECT column_name, data_type 
-            FROM information_schema.columns
-            WHERE table_name = 'students'
-        `);
+        const { rows } = await pool.query('SELECT id, name, email, isbanned, device_fingerprint FROM students ORDER BY id DESC');
         res.json(rows);
     } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch schema', details: err.message });
+        res.status(500).json({ error: 'Failed to fetch students', details: err.message });
     }
 });
 // ==============================================================
