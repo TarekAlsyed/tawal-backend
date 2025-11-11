@@ -20,7 +20,7 @@ function validateEmail(email) {
   const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return re.test(String(email).toLowerCase());
 }
-const BANNED_WORDS = ['كلمة_سيئة', 'لفظ_خارج', 'شتيمة']; // أضف كلماتك هنا
+const BANNED_WORDS = ['كلمة_سيئة', 'لفظ_خارج', 'شتيمة']; 
 function containsBannedWord(text) {
   if (!text) return false;
   const lowerCaseText = text.toLowerCase();
@@ -56,8 +56,7 @@ async function initializeDatabase() {
         name TEXT NOT NULL,
         email TEXT UNIQUE,
         createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-        isBanned INTEGER DEFAULT 0,
-        device_fingerprint TEXT -- (*** السطر الجديد ***)
+        isBanned INTEGER DEFAULT 0
       )
     `);
     
@@ -103,15 +102,41 @@ async function initializeDatabase() {
       )
     `);
     
-    console.log('✓ تم تهيئة جداول PostgreSQL (مع جداول الحظر المتقدم) بنجاح');
     
-    // (*** جديد: تعديل الجدول القديم لإضافة الخانة الجديدة إذا لم تكن موجودة ***)
-    await pool.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS device_fingerprint TEXT');
+    // (*** تعديل: التأكد من إضافة الخانة بشكل صريح ***)
+    try {
+        await pool.query('ALTER TABLE students ADD COLUMN device_fingerprint TEXT');
+        console.log('✓ عمود "device_fingerprint" أضيف بنجاح.');
+    } catch (e) {
+        if (e.code === '42701') { // 42701 = column already exists
+            console.log('✓ عمود "device_fingerprint" موجود بالفعل.');
+        } else {
+            console.error('خطأ أثناء إضافة عمود "device_fingerprint":', e);
+        }
+    }
+    
+    console.log('✓ تم تهيئة جداول PostgreSQL (مع جداول الحظر المتقدم) بنجاح');
 
   } catch (err) {
     console.error('خطأ في تهيئة قاعدة البيانات:', err);
   }
 }
+
+// ============ (*** جديد: أداة فحص قاعدة البيانات ***) ============
+app.get('/api/debug-schema', async (req, res) => {
+    try {
+        const { rows } = await pool.query(`
+            SELECT column_name, data_type 
+            FROM information_schema.columns
+            WHERE table_name = 'students'
+        `);
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch schema', details: err.message });
+    }
+});
+// ==============================================================
+
 
 // ============ API Endpoints ============
 
@@ -124,10 +149,8 @@ app.post('/api/check-device', async (req, res) => {
     try {
         const { rows } = await pool.query('SELECT * FROM banned_fingerprints WHERE fingerprint = $1', [fingerprint]);
         if (rows.length > 0) {
-            // هذا الجهاز محظور
             return res.json({ banned: true });
         } else {
-            // هذا الجهاز سليم
             return res.json({ banned: false });
         }
     } catch (err) {
@@ -184,7 +207,7 @@ app.post('/api/students/register', async (req, res) => {
         res.status(500).json({ error: 'خطأ في جلب بيانات الطالب' });
       }
     } else {
-      res.status(500).json({ error: 'خطأ في التسجيل' });
+      res.status(500).json({ error: 'خطأ في التسجيل', details: err.message });
     }
   }
 });
@@ -193,7 +216,7 @@ app.post('/api/students/register', async (req, res) => {
 app.get('/api/students/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const { rows } = await pool.query('SELECT id, name, email, isBanned FROM students WHERE id = $1', [id]);
+    const { rows } = await pool.query('SELECT id, name, email, isbanned FROM students WHERE id = $1', [id]);
     if (rows.length === 0) return res.status(404).json({ error: 'الطالب غير موجود' });
     res.json(rows[0]);
   } catch (err) {
@@ -239,6 +262,7 @@ app.post('/api/admin/ban', async (req, res) => {
 
 
 // (باقي الـ Endpoints كما هي بدون تعديل...)
+// ... (الكود من 3 إلى 12) ...
 
 // 3. حفظ نتيجة اختبار
 app.post('/api/quiz-results', async (req, res) => {
@@ -290,7 +314,7 @@ app.get('/api/students/:id/stats', async (req, res) => {
 // 6. جلب جميع الطلاب (للإدارة)
 app.get('/api/admin/students', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT id, name, email, createdAt, isBanned FROM students ORDER BY createdAt DESC'); 
+    const { rows } = await pool.query('SELECT id, name, email, createdAt, isBanned, device_fingerprint FROM students ORDER BY createdAt DESC'); 
     res.json(rows || []);
   } catch (err) {
     res.status(500).json({ error: 'خطأ في جلب الطلاب' });
@@ -389,6 +413,7 @@ app.get('/api/admin/activity-logs', async (req, res) => {
     res.status(500).json({ error: 'خطأ في جلب سجلات الأنشطة' });
   }
 });
+
 
 // بدء الخادم
 app.listen(PORT, () => {
