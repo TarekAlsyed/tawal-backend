@@ -11,7 +11,8 @@ const PORT = 3001;
 // Middleware
 // (*** تعديل CORS للسماح بالرابط الصحيح ***)
 const corsOptions = {
-  origin: 'https://tarekalsyed.github.io',
+  // (*** تعديل Gemini: أضف الرابط المحلي للاختبار ***)
+  origin: ['https://tarekalsyed.github.io', 'http://127.0.0.1:5500'],
   optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
@@ -19,6 +20,23 @@ app.use(cors(corsOptions));
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
+
+// (جديد) دالة للتحقق من أن الإيميل يبدو صحيحاً
+function validateEmail(email) {
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(String(email).toLowerCase());
+}
+
+// (جديد) قائمة الكلمات الممنوعة (أضف الكلمات التي تريدها)
+const BANNED_WORDS = ['كلمة_سيئة', 'لفظ_خارج', 'شتيمة'];
+
+// (جديد) دالة لفحص النص
+function containsBannedWord(text) {
+  if (!text) return false;
+  const lowerCaseText = text.toLowerCase();
+  return BANNED_WORDS.some(word => lowerCaseText.includes(word.toLowerCase()));
+}
+
 
 // إنشاء قاعدة البيانات
 const db = new sqlite3.Database('./tawal_academy.db', (err) => {
@@ -39,7 +57,8 @@ function initializeDatabase() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         email TEXT UNIQUE,
-        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        isBanned INTEGER DEFAULT 0  -- (*** السطر الجديد لإضافة خاصية الحظر ***)
       )
     `);
 
@@ -80,32 +99,61 @@ function initializeDatabase() {
       )
     `);
 
-    console.log('✓ تم تهيئة جداول قاعدة البيانات (مع جدول الأنشطة)');
+    console.log('✓ تم تهيئة جداول قاعدة البيانات (مع جدول الأنشطة والحظر)');
   });
 }
 
 // ============ API Endpoints ============
 
-// 1. تسجيل طالب جديد
+// 1. تسجيل طالب جديد (نسخة معدلة مع فلترة وحظر)
 app.post('/api/students/register', (req, res) => {
   const { name, email } = req.body;
+  
+  // --- (بداية الفلترة) ---
   if (!name || !email) {
     return res.status(400).json({ error: 'الاسم والبريد الإلكتروني مطلوبان' });
   }
+  if (containsBannedWord(name)) {
+    return res.status(400).json({ error: 'الاسم الذي أدخلته يحتوي على كلمات غير لائقة.' });
+  }
+  if (!validateEmail(email)) {
+    return res.status(400).json({ error: 'الرجاء إدخال بريد إلكتروني صالح.' });
+  }
+  // --- (نهاية الفلترة) ---
+
+  // محاولة تسجيل الطالب الجديد
   db.run(
     'INSERT INTO students (name, email) VALUES (?, ?)',
     [name, email],
     function(err) {
       if (err) {
         if (err.message.includes('UNIQUE')) {
-          return res.status(400).json({ error: 'البريد الإلكتروني مسجل بالفعل' });
+          // --- (بداية التحقق من الحظر للمستخدم العائد) ---
+          // إذا كان البريد مسجلاً بالفعل، تحقق إذا كان محظوراً
+          db.get('SELECT * FROM students WHERE email = ?', [email], (err, student) => {
+            if (err) return res.status(500).json({ error: 'خطأ في جلب بيانات الطالب' });
+            if (!student) return res.status(400).json({ error: 'خطأ، البريد مسجل ولكن لا يمكن إيجاده' });
+
+            if (student.isBanned === 1) {
+              // (*** هذا هو كود الحظر المطلوب ***)
+              return res.status(403).json({ error: 'هذا الحساب محظور. لا يمكنك الدخول.' });
+            }
+
+            // إذا لم يكن محظوراً، أرسل بياناته للترحيب به
+            res.json({ id: student.id, name: student.name, email: student.email, message: 'أهلاً بعودتك!' });
+          });
+          // --- (نهاية التحقق من الحظر) ---
+        } else {
+          return res.status(500).json({ error: 'خطأ في التسجيل' });
         }
-        return res.status(500).json({ error: 'خطأ في التسجيل' });
+      } else {
+        // نجح التسجيل (طالب جديد)
+        res.json({ id: this.lastID, name, email, message: 'تم التسجيل بنجاح' });
       }
-      res.json({ id: this.lastID, name, email, message: 'تم التسجيل بنجاح' });
     }
   );
 });
+
 
 // 2. الحصول على بيانات الطالب
 app.get('/api/students/:id', (req, res) => {
@@ -277,6 +325,22 @@ app.get('/api/admin/activity-logs', (req, res) => {
     );
 });
 
+// (*** جديد: Endpoint لحظر/فك حظر الطالب ***)
+app.post('/api/admin/ban', (req, res) => {
+    const { studentId, status } = req.body; // status يمكن أن تكون 1 (حظر) أو 0 (فك الحظر)
+    if (studentId === undefined) {
+        return res.status(400).json({ error: 'معرف الطالب مطلوب' });
+    }
+    db.run(
+        'UPDATE students SET isBanned = ? WHERE id = ?',
+        [status, studentId],
+        function(err) {
+            if (err) return res.status(500).json({ error: 'خطأ في تحديث حالة الطالب' });
+            res.json({ message: 'تم تحديث حالة الطالب بنجاح' });
+        }
+    );
+});
+
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -300,6 +364,7 @@ app.listen(PORT, () => {
   console.log('  GET    /api/admin/stats - إحصائيات عامة (إدارة)');
   console.log('  GET    /api/admin/login-logs - سجلات الدخول (إدارة)');
   console.log('  GET    /api/admin/activity-logs - (جديد) سجلات الأنشطة (إدارة)');
+  console.log('  POST   /api/admin/ban - (جديد) حظر/فك حظر طالب');
   console.log('  GET    /api/health - فحص صحة الخادم\n');
 });
 
