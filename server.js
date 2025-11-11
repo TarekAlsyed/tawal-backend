@@ -6,7 +6,6 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3001; 
 
-// (*** جديد: تفعيل الثقة في البروكسي (أساسي لحظر الـ IP) ***)
 app.set('trust proxy', 1);
 
 // Middleware
@@ -49,12 +48,13 @@ const pool = new Pool({
   }
 });
 
-// (*** جديد: الـ Middleware الخاص بحظر الـ IP ***)
+// (*** بداية التعديل: تعديل حارس الـ IP ***)
 // هذا الكود يجب أن يكون قبل أي "Endpoint" تاني
 app.use(async (req, res, next) => {
-    // نتجاهل فحص الـ health check عشان منعملش حظر بالغلط
-    if (req.path === '/api/health') {
-        return next();
+    
+    // (*** تعديل: تجاهل كل مسارات الإدارة ومسار الفحص ***)
+    if (req.path === '/api/health' || req.path.startsWith('/api/admin/')) {
+        return next(); // اترك الأدمن وشأنه
     }
     
     const userIp = req.ip;
@@ -65,11 +65,11 @@ app.use(async (req, res, next) => {
             return res.status(403).json({ error: 'الوصول مرفوض من هذا العنوان (IP).' });
         }
     } catch (err) {
-        // لو قاعدة البيانات لسه بتقوم، عدي الطلب عشان الخادم ميكراش
         console.warn("IP check failed (DB might be starting up):", err.message);
     }
     next();
 });
+// (*** نهاية التعديل ***)
 
 
 // تهيئة قاعدة البيانات (*** تمت إضافة جداول وخانات جديدة ***)
@@ -274,6 +274,8 @@ app.get('/api/students/:id', async (req, res) => {
 // 13. حظر/فك حظر الطالب (*** معدل ليقوم بحظر البصمة والـ IP ***)
 app.post('/api/admin/ban', async (req, res) => {
     const { studentId, status } = req.body;
+    const adminIp = req.ip; // (*** جديد: هنجيب الـ IP بتاع الأدمن ***)
+    
     if (studentId === undefined) {
         return res.status(400).json({ error: 'معرف الطالب مطلوب' });
     }
@@ -300,7 +302,9 @@ app.post('/api/admin/ban', async (req, res) => {
                 [studentId]
             );
             const lastIp = logRows[0]?.ip_address;
-            if (lastIp) {
+            
+            // (*** تعديل: متضفش الـ IP لو كان هو هو بتاع الأدمن ***)
+            if (lastIp && lastIp !== adminIp) {
                 await pool.query(
                     'INSERT INTO banned_ips (ip_address) VALUES ($1) ON CONFLICT (ip_address) DO NOTHING',
                     [lastIp]
