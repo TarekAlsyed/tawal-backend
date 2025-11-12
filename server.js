@@ -270,7 +270,6 @@ app.post('/api/students/register', async (req, res) => {
 
   } catch (err) {
     console.error('register error:', err.message || err);
-    // (إصلاح: التأكد من أن الخطأ 23505 لم يفشل في مكان آخر)
     if (err.code !== '23505') {
         res.status(500).json({ error: 'Internal server error' });
     }
