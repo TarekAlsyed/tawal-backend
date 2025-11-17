@@ -7,11 +7,16 @@ const bodyParser = require('body-parser');
 // (*** تعديل: قم بتغيير هذا السطر ***)
 const { Pool, types } = require('pg');
 
-// (*** جديد: لإصلاح مشكلة "Invalid Date" ***)
-// إخبار مكتبة pg أن تعيد التواريخ كنصوص (String) كما هي من قاعدة البيانات
-// بدلاً من تحويلها إلى كائنات Date في الخادم
-// (1114 هو كود نوع TIMESTAMPTZ)
-types.setTypeParser(1114, stringValue => {
+// (*** جديد وموسع: لإصلاح جميع مشاكل "Invalid Date" ***)
+// إخبار مكتبة pg أن تعيد التواريخ كنصوص (String)
+
+// OID for TIMESTAMP (بدون منطقة زمنية)
+types.setTypeParser(1114, (stringValue) => {
+  return stringValue;
+});
+
+// OID for TIMESTAMPTZ (مع منطقة زمنية - وهو الذي نستخدمه)
+types.setTypeParser(1184, (stringValue) => {
   return stringValue;
 });
 // (*** نهاية الإضافة ***)
