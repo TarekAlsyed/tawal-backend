@@ -4,11 +4,21 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-// (تغيير: استيراد مكتبة pg بدلاً من sqlite3)
-const { Pool } = require('pg');
+// (*** تعديل: قم بتغيير هذا السطر ***)
+const { Pool, types } = require('pg');
+
+// (*** جديد: لإصلاح مشكلة "Invalid Date" ***)
+// إخبار مكتبة pg أن تعيد التواريخ كنصوص (String) كما هي من قاعدة البيانات
+// بدلاً من تحويلها إلى كائنات Date في الخادم
+// (1114 هو كود نوع TIMESTAMPTZ)
+types.setTypeParser(1114, stringValue => {
+  return stringValue;
+});
+// (*** نهاية الإضافة ***)
+
 
 const app = express();
-const PORT = process.env.PORT || 3001; // (تعديل) استخدام المنفذ من الاستضافة
+const PORT = process.env.PORT || 3001; 
 
 // Middleware
 const corsOptions = {
@@ -20,7 +30,6 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // (تغيير: الاتصال بـ PostgreSQL عن طريق الرابط)
-// سيتم سحب الرابط تلقائياً من متغيرات البيئة (DATABASE_URL)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   // (هام: إذا كنت تستخدم Railway، قد تحتاج هذا السطر)
@@ -34,7 +43,7 @@ async function initializeDatabase() {
   const client = await pool.connect();
   try {
     console.log('✓ تم الاتصال بقاعدة بيانات PostgreSQL بنجاح');
-
+    
     // (تغيير: تعديل SQL ليتوافق مع PostgreSQL)
     await client.query(`
       CREATE TABLE IF NOT EXISTS students (
@@ -75,7 +84,7 @@ async function initializeDatabase() {
         timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
+    
     console.log('✓ تم تهيئة جداول PostgreSQL (مع جدول الأنشطة)');
   } catch (err) {
     console.error('خطأ في تهيئة قاعدة البيانات:', err);
@@ -191,7 +200,7 @@ app.get('/api/admin/stats', async (req, res) => {
   try {
     const studentCountResult = await pool.query('SELECT COUNT(*) as totalStudents FROM students');
     const quizStatsResult = await pool.query('SELECT COUNT(*) as totalQuizzes, AVG(score) as averageScore FROM quiz_results');
-
+    
     res.json({
       totalStudents: parseInt(studentCountResult.rows[0].totalstudents) || 0,
       totalQuizzes: parseInt(quizStatsResult.rows[0].totalquizzes) || 0,
