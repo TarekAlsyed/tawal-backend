@@ -1,19 +1,23 @@
 /*
  * =================================================================================
  * SERVER.JS - Tawal Academy Backend API
- * Version: 1.10.0 (Final Full Version)
+ * Version: 1.12.0 (Final Comprehensive Build)
  * =================================================================================
- * هذا الملف يحتوي على الكود المصدري الكامل للخادم (Backend).
- * * المميزات المشمولة:
- * 1. اتصال بقاعدة بيانات PostgreSQL (مع دعم SSL لـ Railway).
- * 2. معالجة صحيحة للتواريخ (Fix Invalid Date).
- * 3. نظام تسجيل ودخول الطلاب (مع التحقق من التكرار).
- * 4. نظام الامتحانات وحفظ النتائج والإحصائيات.
- * 5. لوحة تحكم الإدارة (عرض الطلاب، السجلات، الأنشطة).
- * 6. نظام الحماية الكامل:
- * - حظر الحساب (Account Block).
- * - حظر بصمة الجهاز (Device Fingerprint Block).
- * - فك حظر الجهاز (Unblock Device).
+ * هذا الملف هو "العقل المدبر" للمنصة (Backend Server).
+ * يحتوي على كافة العمليات المنطقية وقواعد البيانات والحماية.
+ *
+ * 📋 جدول المحتويات:
+ * 1. استيراد المكتبات وإعدادات البيئة (Configuration).
+ * 2. إصلاح مشاكل التواريخ في PostgreSQL (Date Parsing).
+ * 3. إعدادات السيرفر والوسيط (Express Middleware).
+ * 4. الاتصال بقاعدة البيانات (Database Connection).
+ * 5. إنشاء الجداول تلقائياً (Database Schema Initialization).
+ * 6. واجهة برمجة التطبيقات (API Endpoints):
+ * أ. المصادقة والتسجيل (Authentication).
+ * ب. بيانات الطلاب والامتحانات (Student Data).
+ * ج. لوحة تحكم الإدارة (Admin Dashboard).
+ * د. نظام الحماية والحظر (Security System).
+ * 7. تشغيل الخادم (Server Start).
  * =================================================================================
  */
 
@@ -21,15 +25,15 @@
 // 1. استيراد المكتبات وإعدادات البيئة
 // ---------------------------------------------------------------------------------
 require('dotenv').config(); // لقراءة المتغيرات من ملف .env
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
+const express = require('express'); // إطار عمل الخادم
+const cors = require('cors'); // للسماح بالاتصال من المتصفح
+const bodyParser = require('body-parser'); // لقراءة البيانات المرسلة
 const { Pool, types } = require('pg'); // مكتبة الاتصال بـ PostgreSQL
 
 // ---------------------------------------------------------------------------------
 // 2. إصلاح مشكلة التواريخ في PostgreSQL
 // ---------------------------------------------------------------------------------
-// هذه الخطوة ضرورية جداً لمنع ظهور التواريخ بتنسيق غير مفهوم أو "Invalid Date"
+// هذه الخطوة ضرورية جداً لمنع ظهور التواريخ بتنسيق غير مفهوم أو "Invalid Date".
 // نقوم بإجبار المكتبة على إرجاع التواريخ كنصوص (String) كما هي مخزنة في القاعدة.
 
 // النوع 1114: TIMESTAMP (بدون منطقة زمنية)
@@ -47,10 +51,11 @@ types.setTypeParser(1184, (stringValue) => {
 // 3. إعدادات تطبيق Express والوسيط (Middleware)
 // ---------------------------------------------------------------------------------
 const app = express();
-const PORT = process.env.PORT || 3001; // استخدام المنفذ المحدد أو 3001
+const PORT = process.env.PORT || 3001; // استخدام المنفذ المحدد من الاستضافة أو 3001
 
+// إعدادات CORS (السماح فقط للموقع الرسمي بالاتصال)
 const corsOptions = {
-    origin: 'https://tarekalsyed.github.io', // السماح فقط للموقع الرسمي بالاتصال
+    origin: 'https://tarekalsyed.github.io', 
     optionsSuccessStatus: 200
 };
 
@@ -71,7 +76,7 @@ const pool = new Pool({
 
 
 // ---------------------------------------------------------------------------------
-// 5. دالة تهيئة قاعدة البيانات (Initialize Database Tables)
+// 5. دالة تهيئة الجداول (Initialize Database Tables)
 // ---------------------------------------------------------------------------------
 // هذه الدالة تعمل تلقائياً عند تشغيل الخادم لإنشاء الجداول إذا لم تكن موجودة.
 
@@ -141,8 +146,9 @@ async function initializeDatabase() {
         `);
 
         // -------------------------------------------
-        // هـ. جدول بصمات الأجهزة (Student Fingerprints) - جديد
+        // هـ. جدول بصمات الأجهزة (Student Fingerprints)
         // -------------------------------------------
+        // يربط كل طالب بالأجهزة التي استخدمها
         await client.query(`
             CREATE TABLE IF NOT EXISTS student_fingerprints (
                 id SERIAL PRIMARY KEY,
@@ -154,8 +160,9 @@ async function initializeDatabase() {
         `);
 
         // -------------------------------------------
-        // و. جدول الأجهزة المحظورة (Blocked Fingerprints) - جديد
+        // و. جدول الأجهزة المحظورة (Blocked Fingerprints)
         // -------------------------------------------
+        // القائمة السوداء للأجهزة
         await client.query(`
             CREATE TABLE IF NOT EXISTS blocked_fingerprints (
                 id SERIAL PRIMARY KEY,
@@ -184,7 +191,10 @@ async function initializeDatabase() {
 /* -------------------------------------------------------------------------- */
 
 /**
- * تسجيل طالب جديد
+ * تسجيل طالب جديد (Smart Registration)
+ * - يتحقق من حظر الجهاز أولاً.
+ * - إذا كان الإيميل جديداً: يسجله.
+ * - إذا كان الإيميل موجوداً: يعيد بياناته للسماح بالدخول (بدلاً من الخطأ).
  * المسار: POST /api/students/register
  */
 app.post('/api/students/register', async (req, res) => {
@@ -206,47 +216,65 @@ app.post('/api/students/register', async (req, res) => {
         }
     }
 
-    // 2. تنفيذ عملية التسجيل
-    let client;
     try {
-        client = await pool.connect();
-        await client.query('BEGIN'); // بدء معاملة (Transaction)
-
-        // إدخال الطالب
-        const result = await client.query(
+        // 2. محاولة تسجيل الطالب الجديد
+        const result = await pool.query(
             'INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *',
             [name, email]
         );
         const newStudent = result.rows[0];
         
-        // تسجيل البصمة مع الحساب الجديد
+        // 3. تسجيل البصمة مع الحساب الجديد
         if (fingerprint) {
-            await client.query(
+            await pool.query(
                 'INSERT INTO student_fingerprints (studentId, fingerprint, lastSeen) VALUES ($1, $2, CURRENT_TIMESTAMP)',
                 [newStudent.id, fingerprint]
             );
         }
         
-        await client.query('COMMIT'); // إتمام المعاملة وحفظ البيانات
         res.json({ ...newStudent, message: 'تم التسجيل بنجاح' });
 
     } catch (err) {
-        if (client) await client.query('ROLLBACK'); // التراجع في حال الخطأ
-        
-        // معالجة حالة الإيميل المكرر
+        // 4. (الحل الذكي) معالجة حالة الإيميل المكرر
         if (err.code === '23505') { 
-            return res.status(400).json({ error: 'البريد الإلكتروني مسجل بالفعل' });
+            try {
+                // جلب بيانات الطالب الموجود
+                const existing = await pool.query('SELECT * FROM students WHERE email = $1', [email]);
+                const student = existing.rows[0];
+
+                // إذا كان حسابه محظوراً، نرفض الدخول
+                if (student.isblocked) {
+                    return res.status(403).json({ error: 'هذا الحساب محظور من قبل الإدارة.' });
+                }
+                
+                // تحديث البصمة للطالب القديم (للسماح بالحظر لاحقاً)
+                if (fingerprint) {
+                    await pool.query(
+                        `INSERT INTO student_fingerprints (studentId, fingerprint, lastSeen) 
+                         VALUES ($1, $2, CURRENT_TIMESTAMP) 
+                         ON CONFLICT (studentId, fingerprint) 
+                         DO UPDATE SET lastSeen = CURRENT_TIMESTAMP`, 
+                        [student.id, fingerprint]
+                    );
+                }
+
+                // إرجاع بيانات الطالب القديم وكأن التسجيل نجح
+                return res.json({ ...student, message: 'حساب موجود (تم استرجاع البيانات)' });
+
+            } catch (e) { 
+                return res.status(500).json({ error: 'خطأ في استرجاع البيانات' }); 
+            }
         }
         
         console.error(err);
         res.status(500).json({ error: 'خطأ في الخادم أثناء التسجيل' });
-    } finally {
-        if (client) client.release();
     }
 });
 
 /**
- * تسجيل الدخول
+ * تسجيل الدخول (Login)
+ * - يتحقق من البصمة ويسجلها.
+ * - يسجل وقت الدخول.
  * المسار: POST /api/login
  */
 app.post('/api/login', async (req, res) => {
@@ -265,7 +293,7 @@ app.post('/api/login', async (req, res) => {
                 return res.status(403).json({ error: 'هذا الجهاز محظور.' });
             }
 
-            // تحديث تاريخ آخر ظهور للبصمة أو إضافتها
+            // تحديث تاريخ آخر ظهور للبصمة
             await pool.query(
                 `INSERT INTO student_fingerprints (studentId, fingerprint, lastSeen) 
                  VALUES ($1, $2, CURRENT_TIMESTAMP) 
@@ -289,7 +317,7 @@ app.post('/api/login', async (req, res) => {
 });
 
 /**
- * تسجيل الخروج
+ * تسجيل الخروج (Logout)
  * المسار: POST /api/logout
  */
 app.post('/api/logout', async (req, res) => {
@@ -300,13 +328,13 @@ app.post('/api/logout', async (req, res) => {
         await pool.query('UPDATE login_logs SET logoutTime = CURRENT_TIMESTAMP WHERE id = $1', [logId]);
         res.json({ message: 'تم تسجيل الخروج' });
     } catch (e) { 
-        res.status(500).json({ error: 'خطأ' }); 
+        res.status(500).json({ error: 'خطأ في تسجيل الخروج' }); 
     }
 });
 
 
 /* -------------------------------------------------------------------------- */
-/* القسم الثاني: بيانات الطلاب والامتحانات (Student Data)                    */
+/* القسم الثاني: بيانات الطلاب والامتحانات (Data & Results)                  */
 /* -------------------------------------------------------------------------- */
 
 // جلب بيانات طالب محدد
@@ -322,7 +350,7 @@ app.get('/api/students/:id', async (req, res) => {
     }
 });
 
-// حفظ نتيجة امتحان
+// حفظ نتيجة امتحان جديد
 app.post('/api/quiz-results', async (req, res) => {
     const { studentId, quizName, score, totalQuestions, correctAnswers } = req.body;
     
@@ -335,13 +363,13 @@ app.post('/api/quiz-results', async (req, res) => {
             'INSERT INTO quiz_results (studentId, quizName, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5)',
             [studentId, quizName, score, totalQuestions, correctAnswers]
         );
-        res.json({ message: 'تم الحفظ بنجاح' });
+        res.json({ message: 'تم حفظ النتيجة بنجاح' });
     } catch (e) { 
         res.status(500).json({ error: 'فشل الحفظ' }); 
     }
 });
 
-// جلب جميع نتائج طالب معين (للعرض في لوحة التحكم أو الملف الشخصي)
+// جلب سجل نتائج طالب معين (للملف الشخصي)
 app.get('/api/students/:id/results', async (req, res) => {
     try {
         const result = await pool.query(
@@ -364,7 +392,7 @@ app.get('/api/students/:id/stats', async (req, res) => {
             return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0, totalCorrect: 0 });
         }
 
-        // حساب الإحصائيات
+        // حساب المتوسط وأفضل درجة
         const totalQuizzes = rs.length;
         const averageScore = Math.round(rs.reduce((a, b) => a + b.score, 0) / totalQuizzes);
         const bestScore = Math.max(...rs.map(x => x.score));
@@ -372,11 +400,11 @@ app.get('/api/students/:id/stats', async (req, res) => {
 
         res.json({ totalQuizzes, averageScore, bestScore, totalCorrect });
     } catch (e) { 
-        res.status(500).json({ error: 'خطأ' }); 
+        res.status(500).json({ error: 'خطأ في الحسابات' }); 
     }
 });
 
-// تسجيل نشاط (تصفح، فتح ملخص، إلخ)
+// تسجيل نشاط (تصفح ملفات أو صور)
 app.post('/api/log-activity', async (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
     try {
@@ -417,7 +445,7 @@ app.get('/api/admin/stats', async (req, res) => {
             averageScore: Math.round(quizStats.rows[0].a || 0)
         });
     } catch (e) { 
-        res.status(500).json({ error: 'خطأ' }); 
+        res.status(500).json({ error: 'خطأ في الإحصائيات' }); 
     }
 });
 
@@ -431,7 +459,7 @@ app.get('/api/admin/login-logs', async (req, res) => {
         `);
         res.json(result.rows || []);
     } catch (e) { 
-        res.status(500).json({ error: 'خطأ' }); 
+        res.status(500).json({ error: 'خطأ في السجلات' }); 
     }
 });
 
@@ -445,49 +473,41 @@ app.get('/api/admin/activity-logs', async (req, res) => {
         `);
         res.json(result.rows || []);
     } catch (e) { 
-        res.status(500).json({ error: 'خطأ' }); 
+        res.status(500).json({ error: 'خطأ في الأنشطة' }); 
     }
 });
 
 
 /* -------------------------------------------------------------------------- */
-/* القسم الرابع: نظام الحظر والحماية (Blocking & Security)                   */
+/* القسم الرابع: نظام الحظر والحماية (Blocking System) - هام جداً             */
 /* -------------------------------------------------------------------------- */
 
 /**
  * 1. حظر / إلغاء حظر الحساب (Account Block)
  * يغير حالة العمود `isBlocked` في جدول `students`.
- * الطالب المحظور لن يتمكن من الدخول بإيميله حتى لو غير الجهاز.
  */
 app.post('/api/admin/students/:id/status', async (req, res) => {
     const { id } = req.params;
-    const { isblocked } = req.body; // تأكدنا من استخدام أحرف صغيرة
+    const { isblocked } = req.body; 
 
-    if (isblocked === undefined) {
-        return res.status(400).json({ error: 'Status required' });
-    }
+    if (isblocked === undefined) return res.status(400).json({ error: 'Status required' });
 
     try {
         const result = await pool.query(
             'UPDATE students SET isblocked = $1 WHERE id = $2 RETURNING id',
             [isblocked, id]
         );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'لم يتم العثور على الطالب' });
-        }
-
-        res.json({ message: 'تم تحديث حالة الحظر بنجاح' });
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Student not found' });
+        res.json({ message: 'تم تحديث حالة الحساب بنجاح' });
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: 'خطأ في الخادم أثناء التحديث' });
+        res.status(500).json({ error: 'Server error' });
     }
 });
 
 /**
  * 2. حظر بصمة الجهاز (Device/Fingerprint Block)
  * يقوم بالبحث عن آخر بصمة استخدمها الطالب ويضيفها للقائمة السوداء.
- * هذا يمنع أي شخص من استخدام هذا الجهاز للتسجيل أو الدخول، حتى لو غير الإيميل.
  */
 app.post('/api/admin/students/:id/block-fingerprint', async (req, res) => {
     const { id } = req.params;
@@ -506,7 +526,7 @@ app.post('/api/admin/students/:id/block-fingerprint', async (req, res) => {
         
         const fingerprintToBlock = fpResult.rows[0].fingerprint;
 
-        // ب. إضافة البصمة إلى جدول المحظورين
+        // ب. إضافة البصمة إلى جدول المحظورين (تجاهل إذا كانت موجودة)
         await pool.query(
             'INSERT INTO blocked_fingerprints (fingerprint, reason) VALUES ($1, $2) ON CONFLICT (fingerprint) DO NOTHING',
             [fingerprintToBlock, reason]
@@ -516,12 +536,12 @@ app.post('/api/admin/students/:id/block-fingerprint', async (req, res) => {
 
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: 'حدث خطأ أثناء محاولة حظر الجهاز.' });
+        res.status(500).json({ error: 'خطأ أثناء حظر البصمة' });
     }
 });
 
 /**
- * 3. فك حظر الجهاز (Unblock Device)
+ * 3. فك حظر الجهاز (Unblock Device) - الميزة الجديدة
  * يقوم بحذف بصمة الطالب من القائمة السوداء للسماح له بالدخول مجدداً.
  */
 app.post('/api/admin/students/:id/unblock-fingerprint', async (req, res) => {
@@ -546,7 +566,7 @@ app.post('/api/admin/students/:id/unblock-fingerprint', async (req, res) => {
             [fingerprintToUnblock]
         );
 
-        res.json({ message: `تم فك حظر الجهاز (${fingerprintToUnblock}) بنجاح.` });
+        res.json({ message: `تم فك حظر الجهاز (${fingerprintToUnblock}) بنجاح. يمكنه التسجيل الآن.` });
 
     } catch (err) {
         console.error(err);
@@ -567,6 +587,6 @@ app.get('/api/health', (req, res) => {
 // بدء الاستماع للمنفذ
 app.listen(PORT, () => {
     console.log(`\n🚀 Server is running on port ${PORT}`);
-    // محاولة تهيئة قاعدة البيانات عند البدء
+    // تشغيل تهيئة قاعدة البيانات عند البدء
     initializeDatabase().catch(console.error);
 });
