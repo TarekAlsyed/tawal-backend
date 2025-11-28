@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 6.0.0 (FIXED: Rate Limits, Timezone, Message Sync)
+ * SERVER.JS - Version 8.0.0 (STABLE: Standard Dates & Full Sync)
  * =================================================================================
  */
 
@@ -8,15 +8,11 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const { Pool, types } = require('pg');
+const { Pool } = require('pg');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-
-// إصلاح مشكلة قراءة التواريخ من قاعدة البيانات
-types.setTypeParser(1114, (str) => str); // Timestamp without timezone
-types.setTypeParser(1184, (str) => str); // Timestamp with timezone
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -36,7 +32,7 @@ app.use(cors({
         if (allowedOrigins.indexOf(origin) !== -1) {
             callback(null, true);
         } else {
-            callback(null, true); // تخفيف القيود مؤقتاً لحل المشاكل
+            callback(null, true); 
         }
     },
     credentials: false,
@@ -52,24 +48,20 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// 🔥 إصلاح 1: توسيع حد الطلبات (Rate Limit Fix)
-// تم رفع الحد من 100 إلى 1000 طلب كل 15 دقيقة لتجنب الخطأ 429
+// حد الطلبات (موسع لتجنب المشاكل)
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
-    max: 1000, 
+    max: 2000, // رفع الحد إلى 2000
     message: { error: 'Too many requests' },
     standardHeaders: true,
     legacyHeaders: false,
 });
 app.use('/api/', generalLimiter);
 
-// 3. تهيئة قاعدة البيانات وضبط التوقيت
+// 3. تهيئة الجداول
 async function initializeDatabase() {
     const client = await pool.connect();
     try {
-        // 🔥 إصلاح 2: ضبط توقيت السيرفر للقاهرة/المنطقة العربية
-        await client.query("SET TIME ZONE 'Africa/Cairo'");
-        
         console.log('🔄 [DB] Checking tables...');
         await client.query(`CREATE TABLE IF NOT EXISTS students (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, isBlocked BOOLEAN DEFAULT FALSE)`);
         await client.query(`CREATE TABLE IF NOT EXISTS quiz_results (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), quizName TEXT NOT NULL, subjectId TEXT, score INTEGER NOT NULL, totalQuestions INTEGER NOT NULL, correctAnswers INTEGER NOT NULL, completedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
@@ -83,7 +75,7 @@ async function initializeDatabase() {
     } catch (err) { console.error('❌ [DB] Error:', err); } finally { client.release(); }
 }
 
-// ================== Middleware ==================
+// Middleware
 function authenticateAdmin(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -97,9 +89,9 @@ function authenticateAdmin(req, res, next) {
     });
 }
 
-// ================== Endpoints ==================
+// --- Endpoints ---
 
-// تسجيل دخول الأدمن
+// أدمن
 app.post('/api/admin/login', async (req, res) => {
     const { password } = req.body;
     const adminHash = process.env.ADMIN_PASSWORD_HASH;
@@ -114,7 +106,7 @@ app.post('/api/admin/login', async (req, res) => {
     }
 });
 
-// التحقق من البصمة
+// بصمة
 app.post('/api/verify-fingerprint', async (req, res) => {
     const { fingerprint } = req.body;
     if (!fingerprint) return res.status(400).json({ ok: false });
@@ -125,7 +117,7 @@ app.post('/api/verify-fingerprint', async (req, res) => {
     } catch (e) { res.status(500).json({ ok: false }); }
 });
 
-// تسجيل الطلاب
+// تسجيل
 app.post('/api/students/register', async (req, res) => {
     const { name, email, fingerprint } = req.body;
     if (fingerprint) {
@@ -147,29 +139,23 @@ app.post('/api/students/register', async (req, res) => {
     }
 });
 
-// 🔥 إصلاح 3: نظام الرسائل (مزامنة حقيقية مع قاعدة البيانات)
+// رسائل (مع إصلاح العد)
 app.post('/api/messages', async (req, res) => {
     const { studentId, message } = req.body;
     if (!studentId || !message) return res.status(400).json({ error: 'Missing data' });
 
     try {
-        // نضبط التوقيت للتأكد من حساب اليوم بشكل صحيح
-        await pool.query("SET TIME ZONE 'Africa/Cairo'");
-        
-        // نحسب الرسائل الحقيقية الموجودة في قاعدة البيانات لهذا اليوم
-        const todayCountQuery = await pool.query(
-            "SELECT COUNT(*) FROM messages WHERE studentId = $1 AND createdAt::date = CURRENT_DATE",
+        // حساب عدد الرسائل بناءً على تاريخ اليوم (UTC)
+        const countQuery = await pool.query(
+            "SELECT COUNT(*) FROM messages WHERE studentId = $1 AND createdAt >= CURRENT_DATE",
             [studentId]
         );
-
-        const count = parseInt(todayCountQuery.rows[0].count);
+        const count = parseInt(countQuery.rows[0].count);
         
-        // إذا كان العدد 3 أو أكثر، نمنع الإرسال
         if (count >= 3) {
             return res.status(429).json({ 
                 error: 'عفواً، لقد استنفذت رصيد الرسائل اليومي (3 رسائل).',
-                remaining: 0,
-                currentCount: count
+                remaining: 0
             });
         }
 
@@ -177,36 +163,33 @@ app.post('/api/messages', async (req, res) => {
         
         res.json({ 
             message: 'Sent', 
-            remaining: 2 - count, // المتبقي بعد هذه الرسالة
-            currentCount: count + 1
+            remaining: 2 - count
         });
     } catch (e) {
         console.error(e);
-        res.status(500).json({ error: 'Error sending message' });
+        res.status(500).json({ error: 'Error' });
     }
 });
 
-// جلب رسائل الطالب (مع معرفة العدد المستخدم)
 app.get('/api/students/:id/messages', async (req, res) => {
     try { 
-        await pool.query("SET TIME ZONE 'Africa/Cairo'");
         const r = await pool.query('SELECT * FROM messages WHERE studentId = $1 ORDER BY createdAt DESC', [req.params.id]); 
         
-        // حساب عدد رسائل اليوم
-        const todayStr = new Date().toISOString().split('T')[0];
-        const todayCount = r.rows.filter(m => m.createdat && m.createdat.startsWith(todayStr)).length;
+        // حساب المتبقي
+        const now = new Date();
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+        const todayCount = r.rows.filter(m => m.createdat >= new Date(startOfDay)).length;
 
         res.json({
             messages: r.rows,
-            todayCount: todayCount,
             remaining: Math.max(0, 3 - todayCount)
         });
     } catch(e) { res.status(500).json([]); }
 });
 
-// --- وظائف الأدمن ---
+// Admin endpoints
 app.get('/api/admin/messages', authenticateAdmin, async (req, res) => {
-    try { await pool.query("SET TIME ZONE 'Africa/Cairo'"); const r = await pool.query(`SELECT m.id, m.content, m.adminReply, m.createdAt, s.name as "studentName" FROM messages m JOIN students s ON m.studentId = s.id ORDER BY m.createdAt DESC LIMIT 100`); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); }
+    try { const r = await pool.query(`SELECT m.id, m.content, m.adminReply, m.createdAt, s.name as "studentName" FROM messages m JOIN students s ON m.studentId = s.id ORDER BY m.createdAt DESC LIMIT 100`); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.post('/api/admin/messages/:id/reply', authenticateAdmin, async (req, res) => {
@@ -217,7 +200,7 @@ app.delete('/api/admin/messages/:id', authenticateAdmin, async (req, res) => {
     try { await pool.query('DELETE FROM messages WHERE id = $1', [req.params.id]); res.json({ message: 'Deleted' }); } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// باقي الدوال (بدون تغيير كبير، فقط نسخ لضمان عمل الملف)
+// Other endpoints
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
     try {
@@ -242,7 +225,7 @@ app.get('/api/students/:id/results', async (req, res) => { try { const r = await
 app.get('/api/students/:id/stats', async (req, res) => { try { const r = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1', [req.params.id]); const rs = r.rows; if (!rs.length) return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0 }); res.json({ totalQuizzes: rs.length, averageScore: Math.round(rs.reduce((a, b) => a + b.score, 0) / rs.length), bestScore: Math.max(...rs.map(x => x.score)) }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 app.get('/api/quiz-status', async (req, res) => { try { const r = await pool.query('SELECT * FROM quiz_status'); const map = {}; r.rows.forEach(row => map[row.subjectid] = { locked: row.locked, message: row.message }); res.json(map); } catch (e) { res.json({}); } });
 app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res) => { try { await pool.query(`INSERT INTO quiz_status (subjectId, locked, message, updatedAt) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (subjectId) DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP`, [req.params.subjectId, req.body.locked, req.body.message]); res.json({ message: 'Updated' }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.get('/api/admin/login-logs', authenticateAdmin, async (req, res) => { try { await pool.query("SET TIME ZONE 'Africa/Cairo'"); const r = await pool.query(`SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime FROM login_logs ll JOIN students s ON ll.studentId = s.id ORDER BY ll.loginTime DESC LIMIT 50`); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); } });
+app.get('/api/admin/login-logs', authenticateAdmin, async (req, res) => { try { const r = await pool.query(`SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime FROM login_logs ll JOIN students s ON ll.studentId = s.id ORDER BY ll.loginTime DESC LIMIT 50`); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
