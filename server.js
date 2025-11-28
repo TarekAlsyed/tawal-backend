@@ -1,7 +1,7 @@
 /*
  * =================================================================================
  * SERVER.JS - Tawal Academy Backend API
- * Version: 2.2.0 (Updated: Messaging System + Quiz Locks)
+ * Version: 3.0.0 (FINAL: No-Cache + Fixed Names + Messaging)
  * =================================================================================
  */
 
@@ -28,257 +28,115 @@ app.use(cors(corsOptions));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// 🔥 هام جداً: منع الكاش نهائياً (Fix Caching Issues)
+// هذا الكود يضمن أن المتصفح لا يخزن استجابات الـ API، مما يجعل القفل/الفتح فوري
+app.use((req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    next();
+});
+
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false
-    }
+    ssl: { rejectUnauthorized: false }
 });
 
 // ---------------------------------------------------------------------------------
 // 1. تهيئة قاعدة البيانات (Database Initialization)
 // ---------------------------------------------------------------------------------
-
 async function initializeDatabase() {
     const client = await pool.connect();
     try {
-        console.log('🔄 [DB] جاري تهيئة قاعدة البيانات...');
-
-        // جدول الطلاب
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS students (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                email TEXT UNIQUE,
-                createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                isBlocked BOOLEAN DEFAULT FALSE
-            )
-        `);
+        console.log('🔄 [DB] Checking tables...');
         
-        // جدول النتائج
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS quiz_results (
-                id SERIAL PRIMARY KEY,
-                studentId INTEGER NOT NULL REFERENCES students(id),
-                quizName TEXT NOT NULL,
-                subjectId TEXT,
-                score INTEGER NOT NULL,
-                totalQuestions INTEGER NOT NULL,
-                correctAnswers INTEGER NOT NULL,
-                completedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
+        // الجداول الأساسية
+        await client.query(`CREATE TABLE IF NOT EXISTS students (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, isBlocked BOOLEAN DEFAULT FALSE)`);
+        await client.query(`CREATE TABLE IF NOT EXISTS quiz_results (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), quizName TEXT NOT NULL, subjectId TEXT, score INTEGER NOT NULL, totalQuestions INTEGER NOT NULL, correctAnswers INTEGER NOT NULL, completedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
         
-        // التأكد من وجود عمود subjectId (للتحديثات القديمة)
+        // التأكد من وجود الأعمدة الجديدة
         try { await client.query('ALTER TABLE quiz_results ADD COLUMN IF NOT EXISTS subjectId TEXT'); } catch (e) { }
-
-        // جدول الرسائل (جديد ✅)
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS messages (
-                id SERIAL PRIMARY KEY,
-                studentId INTEGER NOT NULL REFERENCES students(id),
-                content TEXT NOT NULL,
-                isRead BOOLEAN DEFAULT FALSE,
-                createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // جدول سجل الدخول
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS login_logs (
-                id SERIAL PRIMARY KEY,
-                studentId INTEGER NOT NULL REFERENCES students(id),
-                loginTime TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                logoutTime TIMESTAMPTZ
-            )
-        `);
-
-        // جدول سجل النشاط
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS activity_logs (
-                id SERIAL PRIMARY KEY,
-                studentId INTEGER NOT NULL REFERENCES students(id),
-                activityType TEXT NOT NULL,
-                subjectName TEXT,
-                timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // جدول البصمات
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS student_fingerprints (
-                id SERIAL PRIMARY KEY,
-                studentId INTEGER NOT NULL REFERENCES students(id),
-                fingerprint TEXT NOT NULL,
-                lastSeen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(studentId, fingerprint)
-            )
-        `);
-
-        // جدول البصمات المحظورة
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS blocked_fingerprints (
-                id SERIAL PRIMARY KEY,
-                fingerprint TEXT UNIQUE NOT NULL,
-                reason TEXT,
-                createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        // جدول حالة الاختبارات (القفل)
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS quiz_status (
-                id SERIAL PRIMARY KEY,
-                subjectId TEXT UNIQUE NOT NULL,
-                locked BOOLEAN DEFAULT FALSE,
-                message TEXT,
-                updatedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
+        try { await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS isBlocked BOOLEAN DEFAULT FALSE'); } catch (e) { }
         
-        console.log('✅ [DB] تم الانتهاء من تهيئة جميع الجداول بنجاح.');
-
-    } catch (err) {
-        console.error('❌ [DB] خطأ في التهيئة:', err);
-    } finally {
-        client.release();
-    }
+        // جداول الرسائل والأنشطة والقفل
+        await client.query(`CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), content TEXT NOT NULL, isRead BOOLEAN DEFAULT FALSE, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
+        await client.query(`CREATE TABLE IF NOT EXISTS login_logs (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), loginTime TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, logoutTime TIMESTAMPTZ)`);
+        await client.query(`CREATE TABLE IF NOT EXISTS activity_logs (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), activityType TEXT NOT NULL, subjectName TEXT, timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
+        await client.query(`CREATE TABLE IF NOT EXISTS student_fingerprints (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), fingerprint TEXT NOT NULL, lastSeen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, UNIQUE(studentId, fingerprint))`);
+        await client.query(`CREATE TABLE IF NOT EXISTS blocked_fingerprints (id SERIAL PRIMARY KEY, fingerprint TEXT UNIQUE NOT NULL, reason TEXT, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
+        await client.query(`CREATE TABLE IF NOT EXISTS quiz_status (id SERIAL PRIMARY KEY, subjectId TEXT UNIQUE NOT NULL, locked BOOLEAN DEFAULT FALSE, message TEXT, updatedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
+        
+        console.log('✅ [DB] Database Ready.');
+    } catch (err) { console.error('❌ [DB] Error:', err); } finally { client.release(); }
 }
 
 // ---------------------------------------------------------------------------------
-// 2. إدارة الطلاب والمصادقة (Auth & Students)
+// 2. إدارة الطلاب (Auth)
 // ---------------------------------------------------------------------------------
-
 app.post('/api/students/register', async (req, res) => {
     const { name, email, fingerprint } = req.body;
-    
-    if (!name || !email) {
-        return res.status(400).json({ error: 'البيانات ناقصة (الاسم أو البريد)' });
-    }
+    if (!name || !email) return res.status(400).json({ error: 'بيانات ناقصة' });
 
     if (fingerprint) {
         try {
-            const blockedCheck = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
-            if (blockedCheck.rows.length > 0) {
-                return res.status(403).json({ error: 'هذا الجهاز محظور من التسجيل.' });
-            }
-        } catch (e) { console.error(e); }
+            const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
+            if (blocked.rows.length > 0) return res.status(403).json({ error: 'جهاز محظور' });
+        } catch (e) {}
     }
 
     try {
-        const result = await pool.query(
-            'INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *',
-            [name, email]
-        );
+        const result = await pool.query('INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *', [name, email]);
         const newStudent = result.rows[0];
-        
-        if (fingerprint) {
-            await pool.query(
-                'INSERT INTO student_fingerprints (studentId, fingerprint, lastSeen) VALUES ($1, $2, CURRENT_TIMESTAMP)',
-                [newStudent.id, fingerprint]
-            );
-        }
-        
-        res.json({ 
-            id: newStudent.id,
-            name: newStudent.name,
-            email: newStudent.email,
-            createdat: newStudent.createdat,
-            message: 'تم التسجيل بنجاح' 
-        });
-
+        if (fingerprint) await pool.query('INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2)', [newStudent.id, fingerprint]);
+        res.json(newStudent);
     } catch (err) {
-        if (err.code === '23505') { 
-            try {
-                const existing = await pool.query('SELECT * FROM students WHERE email = $1', [email]);
-                const student = existing.rows[0];
-
-                if (student.isblocked) {
-                    return res.status(403).json({ error: 'هذا الحساب محظور من قبل الإدارة.' });
-                }
-                
-                if (fingerprint) {
-                    await pool.query(
-                        `INSERT INTO student_fingerprints (studentId, fingerprint, lastSeen) 
-                         VALUES ($1, $2, CURRENT_TIMESTAMP) 
-                         ON CONFLICT (studentId, fingerprint) 
-                         DO UPDATE SET lastSeen = CURRENT_TIMESTAMP`, 
-                        [student.id, fingerprint]
-                    );
-                }
-
-                return res.json({ 
-                    id: student.id,
-                    name: student.name,
-                    email: student.email,
-                    createdat: student.createdat,
-                    message: 'حساب موجود' 
-                });
-
-            } catch (e) { return res.status(500).json({ error: 'خطأ في استرجاع البيانات' }); }
+        if (err.code === '23505') {
+            const existing = await pool.query('SELECT * FROM students WHERE email = $1', [email]);
+            if (existing.rows[0].isblocked) return res.status(403).json({ error: 'حساب محظور' });
+            if (fingerprint) await pool.query(`INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2) ON CONFLICT (studentId, fingerprint) DO UPDATE SET lastSeen=CURRENT_TIMESTAMP`, [existing.rows[0].id, fingerprint]);
+            return res.json(existing.rows[0]);
         }
-        res.status(500).json({ error: 'خطأ في الخادم' });
+        res.status(500).json({ error: 'Server Error' });
     }
 });
 
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
-    if (!studentId) return res.status(400).json({ error: 'مطلوب ID الطالب' });
-
     try {
         if (fingerprint) {
-            const blockedCheck = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
-            if (blockedCheck.rows.length > 0) return res.status(403).json({ error: 'هذا الجهاز محظور.' });
-
-            await pool.query(
-                `INSERT INTO student_fingerprints (studentId, fingerprint, lastSeen) 
-                 VALUES ($1, $2, CURRENT_TIMESTAMP) 
-                 ON CONFLICT (studentId, fingerprint) DO UPDATE SET lastSeen = CURRENT_TIMESTAMP`,
-                [studentId, fingerprint]
-            );
+            const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
+            if (blocked.rows.length > 0) return res.status(403).json({ error: 'جهاز محظور' });
+            await pool.query(`INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2) ON CONFLICT (studentId, fingerprint) DO UPDATE SET lastSeen=CURRENT_TIMESTAMP`, [studentId, fingerprint]);
         }
-        
         const result = await pool.query('INSERT INTO login_logs (studentId) VALUES ($1) RETURNING id', [studentId]);
-        res.json({ logId: result.rows[0].id, message: 'تم تسجيل الدخول' });
-
-    } catch (err) { res.status(500).json({ error: 'خطأ أثناء تسجيل الدخول' }); }
+        res.json({ logId: result.rows[0].id });
+    } catch (e) { res.status(500).json({ error: 'Login Error' }); }
 });
 
 app.get('/api/students/:id', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM students WHERE id = $1', [req.params.id]);
-        if (result.rows.length === 0) return res.status(404).json({ error: 'الطالب غير موجود' });
-        res.json(result.rows[0]);
-    } catch (e) { res.status(500).json({ error: 'خطأ خادم' }); }
+        const resDb = await pool.query('SELECT * FROM students WHERE id = $1', [req.params.id]);
+        if (!resDb.rows.length) return res.status(404).json({ error: 'Not Found' });
+        res.json(resDb.rows[0]);
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 // ---------------------------------------------------------------------------------
-// 3. إدارة الرسائل (Messaging System - NEW)
+// 3. نظام الرسائل (Messaging)
 // ---------------------------------------------------------------------------------
-
-// إرسال رسالة من الطالب
 app.post('/api/messages', async (req, res) => {
-    const { studentId, message } = req.body;
-    if (!studentId || !message) return res.status(400).json({ error: 'البيانات ناقصة' });
-
     try {
-        await pool.query(
-            'INSERT INTO messages (studentId, content) VALUES ($1, $2)',
-            [studentId, message]
-        );
-        console.log(`📩 رسالة جديدة من Student ${studentId}`);
-        res.json({ message: 'تم إرسال الرسالة بنجاح' });
-    } catch (e) {
-        console.error('❌ خطأ في إرسال الرسالة:', e);
-        res.status(500).json({ error: 'فشل الإرسال' });
-    }
+        await pool.query('INSERT INTO messages (studentId, content) VALUES ($1, $2)', [req.body.studentId, req.body.message]);
+        res.json({ message: 'Sent' });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// جلب الرسائل للإدارة
+// 🔥 إصلاح اسم الطالب (Fix Student Name Case)
 app.get('/api/admin/messages', async (req, res) => {
     try {
+        // استخدام علامات التنصيص "studentName" للحفاظ على حالة الأحرف (CamelCase)
         const result = await pool.query(`
-            SELECT m.id, m.content, m.createdAt, s.name as studentName
+            SELECT m.id, m.content, m.createdAt, s.name as "studentName"
             FROM messages m
             JOIN students s ON m.studentId = s.id
             ORDER BY m.createdAt DESC
@@ -286,183 +144,119 @@ app.get('/api/admin/messages', async (req, res) => {
         `);
         res.json(result.rows || []);
     } catch (e) {
-        console.error('❌ خطأ في جلب الرسائل:', e);
-        res.status(500).json({ error: 'خطأ في جلب الرسائل' });
+        console.error(e);
+        res.status(500).json({ error: 'Error fetching messages' });
     }
 });
 
-// حذف رسالة
 app.delete('/api/admin/messages/:id', async (req, res) => {
-    try {
-        await pool.query('DELETE FROM messages WHERE id = $1', [req.params.id]);
-        res.json({ message: 'تم الحذف' });
-    } catch (e) { res.status(500).json({ error: 'فشل الحذف' }); }
+    try { await pool.query('DELETE FROM messages WHERE id = $1', [req.params.id]); res.json({ message: 'Deleted' }); } 
+    catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 // ---------------------------------------------------------------------------------
-// 4. إدارة الاختبارات والنتائج
+// 4. النتائج والإحصائيات
 // ---------------------------------------------------------------------------------
-
 app.post('/api/quiz-results', async (req, res) => {
-    const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
-    
-    if (!studentId || !quizName) return res.status(400).json({ error: 'بيانات ناقصة' });
-
     try {
-        await pool.query(
-            'INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5, $6)',
-            [studentId, quizName, subjectId || null, score || 0, totalQuestions || 0, correctAnswers || 0]
-        );
-        res.json({ message: 'تم حفظ النتيجة بنجاح' });
-    } catch (e) { res.status(500).json({ error: 'فشل الحفظ' }); }
+        await pool.query('INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5, $6)', 
+            [req.body.studentId, req.body.quizName, req.body.subjectId, req.body.score, req.body.totalQuestions, req.body.correctAnswers]);
+        res.json({ message: 'Saved' });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.get('/api/students/:id/results', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1 ORDER BY completedAt DESC', [req.params.id]);
-        res.json(result.rows || []);
-    } catch (e) { res.status(500).json({ error: 'خطأ' }); }
+        const r = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1 ORDER BY completedAt DESC', [req.params.id]);
+        res.json(r.rows);
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.get('/api/students/:id/stats', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1', [req.params.id]);
-        const rs = result.rows;
-        
+        const r = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1', [req.params.id]);
+        const rs = r.rows;
         if (!rs.length) return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0 });
-
-        const totalQuizzes = rs.length;
-        const averageScore = Math.round(rs.reduce((a, b) => a + b.score, 0) / totalQuizzes);
-        const bestScore = Math.max(...rs.map(x => x.score));
-
-        res.json({ totalQuizzes, averageScore, bestScore });
-    } catch (e) { res.status(500).json({ error: 'خطأ في الحسابات' }); }
+        res.json({
+            totalQuizzes: rs.length,
+            averageScore: Math.round(rs.reduce((a, b) => a + b.score, 0) / rs.length),
+            bestScore: Math.max(...rs.map(x => x.score))
+        });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 // ---------------------------------------------------------------------------------
-// 5. نظام قفل الاختبارات
+// 5. نظام القفل (Quiz Locking)
 // ---------------------------------------------------------------------------------
-
 app.get('/api/quiz-status', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM quiz_status');
-        const statusMap = {};
-        result.rows.forEach(row => {
-            statusMap[row.subjectid] = { locked: row.locked, message: row.message };
-        });
-        res.json(statusMap);
+        const r = await pool.query('SELECT * FROM quiz_status');
+        const map = {}; r.rows.forEach(row => map[row.subjectid] = { locked: row.locked, message: row.message });
+        res.json(map);
     } catch (e) { res.json({}); }
 });
 
 app.post('/api/admin/quiz-status/:subjectId', async (req, res) => {
-    const { subjectId } = req.params;
-    const { locked, message } = req.body;
-
     try {
-        await pool.query(
-            `INSERT INTO quiz_status (subjectId, locked, message, updatedAt) 
-             VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-             ON CONFLICT (subjectId) 
-             DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP`,
-            [subjectId, locked, message || null]
-        );
-        res.json({ message: 'تم تحديث حالة الاختبار' });
-    } catch (e) { res.status(500).json({ error: 'خطأ في التحديث' }); }
+        await pool.query(`INSERT INTO quiz_status (subjectId, locked, message, updatedAt) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (subjectId) DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP`, 
+            [req.params.subjectId, req.body.locked, req.body.message]);
+        res.json({ message: 'Updated' });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 // ---------------------------------------------------------------------------------
-// 6. لوحة تحكم الإدارة (Admin APIs)
+// 6. لوحة التحكم (Admin Stats & Logs)
 // ---------------------------------------------------------------------------------
-
 app.get('/api/admin/students', async (req, res) => {
-    try {
-        const result = await pool.query('SELECT * FROM students ORDER BY createdAt DESC');
-        res.json(result.rows || []);
-    } catch (e) { res.status(500).json({ error: 'خطأ في جلب الطلاب' }); }
+    try { const r = await pool.query('SELECT * FROM students ORDER BY createdAt DESC'); res.json(r.rows); } 
+    catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.get('/api/admin/stats', async (req, res) => {
     try {
-        const studentCount = await pool.query('SELECT COUNT(*) as t FROM students');
-        const quizStats = await pool.query('SELECT COUNT(*) as t, AVG(score) as a FROM quiz_results');
-        
-        res.json({
-            totalStudents: parseInt(studentCount.rows[0].t) || 0,
-            totalQuizzes: parseInt(quizStats.rows[0].t) || 0,
-            averageScore: Math.round(quizStats.rows[0].a || 0)
-        });
-    } catch (e) { res.status(500).json({ error: 'خطأ' }); }
-});
-
-app.get('/api/admin/login-logs', async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime 
-            FROM login_logs ll JOIN students s ON ll.studentId = s.id 
-            ORDER BY ll.loginTime DESC LIMIT 50
-        `);
-        res.json(result.rows || []);
-    } catch (e) { res.status(500).json({ error: 'خطأ' }); }
+        const s = await pool.query('SELECT COUNT(*) as t FROM students');
+        const q = await pool.query('SELECT COUNT(*) as t, AVG(score) as a FROM quiz_results');
+        res.json({ totalStudents: parseInt(s.rows[0].t), totalQuizzes: parseInt(q.rows[0].t), averageScore: Math.round(q.rows[0].a || 0) });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.get('/api/admin/activity-logs', async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT act.id, s.name, act.activityType, act.subjectName, act.timestamp 
-            FROM activity_logs act JOIN students s ON act.studentId = s.id 
-            ORDER BY act.timestamp DESC LIMIT 50
-        `);
-        res.json(result.rows || []);
-    } catch (e) { res.status(500).json({ error: 'خطأ' }); }
+    try { const r = await pool.query(`SELECT act.id, s.name, act.activityType, act.subjectName, act.timestamp FROM activity_logs act JOIN students s ON act.studentId = s.id ORDER BY act.timestamp DESC LIMIT 50`); res.json(r.rows); } 
+    catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// حظر الحسابات والأجهزة
+app.get('/api/admin/login-logs', async (req, res) => {
+    try { const r = await pool.query(`SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime FROM login_logs ll JOIN students s ON ll.studentId = s.id ORDER BY ll.loginTime DESC LIMIT 50`); res.json(r.rows); } 
+    catch (e) { res.status(500).json({ error: 'Error' }); }
+});
+
+// Blocking System
 app.post('/api/admin/students/:id/status', async (req, res) => {
-    const { id } = req.params;
-    const { isblocked } = req.body;
-    try {
-        const result = await pool.query('UPDATE students SET isblocked = $1 WHERE id = $2 RETURNING id', [isblocked, id]);
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Student not found' });
-        res.json({ message: 'تم تحديث الحالة' });
-    } catch (err) { res.status(500).json({ error: 'Error' }); }
+    try { await pool.query('UPDATE students SET isblocked = $1 WHERE id = $2', [req.body.isblocked, req.params.id]); res.json({ message: 'Updated' }); } 
+    catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.post('/api/admin/students/:id/block-fingerprint', async (req, res) => {
-    const { id } = req.params;
     try {
-        const fpResult = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [id]);
-        if (fpResult.rows.length === 0) return res.status(404).json({ error: 'لا توجد بصمة' });
-        
-        await pool.query('INSERT INTO blocked_fingerprints (fingerprint, reason) VALUES ($1, $2) ON CONFLICT (fingerprint) DO NOTHING', [fpResult.rows[0].fingerprint, 'Admin Block']);
-        res.json({ message: 'تم حظر الجهاز' });
-    } catch (err) { res.status(500).json({ error: 'Error' }); }
+        const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]);
+        if (!fp.rows.length) return res.status(404).json({ error: 'No fingerprint' });
+        await pool.query('INSERT INTO blocked_fingerprints (fingerprint, reason) VALUES ($1, $2) ON CONFLICT DO NOTHING', [fp.rows[0].fingerprint, 'Admin Block']);
+        res.json({ message: 'Blocked' });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.post('/api/admin/students/:id/unblock-fingerprint', async (req, res) => {
-    const { id } = req.params;
     try {
-        const fpResult = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [id]);
-        if (fpResult.rows.length === 0) return res.status(404).json({ error: 'لا توجد بصمة' });
-        
-        await pool.query('DELETE FROM blocked_fingerprints WHERE fingerprint = $1', [fpResult.rows[0].fingerprint]);
-        res.json({ message: 'تم فك الحظر' });
-    } catch (err) { res.status(500).json({ error: 'Error' }); }
+        const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]);
+        if (!fp.rows.length) return res.status(404).json({ error: 'No fingerprint' });
+        await pool.query('DELETE FROM blocked_fingerprints WHERE fingerprint = $1', [fp.rows[0].fingerprint]);
+        res.json({ message: 'Unblocked' });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// ---------------------------------------------------------------------------------
-// 7. تشغيل السيرفر
-// ---------------------------------------------------------------------------------
-
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'OK', message: 'Server is running correctly ✅' });
-});
+app.get('/api/health', (req, res) => res.json({ status: 'OK' }));
 
 app.listen(PORT, () => {
-    console.log(`\n🚀 ═══════════════════════════════════════════════════`);
-    console.log(`   Tawal Academy Backend Server v2.2.0`);
-    console.log(`   🌐 Server running on port: ${PORT}`);
-    console.log(`   ✅ Database & Messaging System: Ready`);
-    console.log(`═══════════════════════════════════════════════════\n`);
-    
-    initializeDatabase().catch(console.error);
+    console.log(`🚀 Server running on port ${PORT}`);
+    initializeDatabase();
 });
