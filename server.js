@@ -1,14 +1,7 @@
 /*
  * =================================================================================
- * SERVER.JS - Tawal Academy Backend API (FIXED VERSION)
- * Version: 2.0.0 (Complete Fix - All Issues Resolved)
- * =================================================================================
- * التحديثات:
- * ✅ إصلاح endpoint حفظ النتائج (يستقبل studentId بشكل صحيح)
- * ✅ إصلاح endpoint تسجيل الأنشطة
- * ✅ إضافة عمود subjectId لجدول quiz_results
- * ✅ تحسين معالجة الأخطاء
- * ✅ إصلاح مشاكل PostgreSQL مع أسماء الأعمدة
+ * SERVER.JS - Tawal Academy Backend API
+ * Version: 2.1.0 (إضافة نظام قفل الاختبارات)
  * =================================================================================
  */
 
@@ -18,16 +11,14 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const { Pool, types } = require('pg');
 
-// إصلاح التواريخ
 types.setTypeParser(1114, (stringValue) => stringValue);
 types.setTypeParser(1184, (stringValue) => stringValue);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// CORS Settings
 const corsOptions = {
-    origin: ['https://tarekalsyed.github.io', 'http://localhost:3000'],
+    origin: ['https://tarekalsyed.github.io', 'http://localhost:3000', 'http://127.0.0.1:5500'],
     optionsSuccessStatus: 200,
     credentials: true
 };
@@ -36,7 +27,6 @@ app.use(cors(corsOptions));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Database Connection
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
@@ -44,16 +34,11 @@ const pool = new Pool({
     }
 });
 
-/* -------------------------------------------------------------------------- */
-/* Database Initialization (مُحدّث)                                          */
-/* -------------------------------------------------------------------------- */
-
 async function initializeDatabase() {
     const client = await pool.connect();
     try {
         console.log('🔄 [DB] جاري تهيئة قاعدة البيانات...');
 
-        // جدول الطلاب
         await client.query(`
             CREATE TABLE IF NOT EXISTS students (
                 id SERIAL PRIMARY KEY,
@@ -66,9 +51,8 @@ async function initializeDatabase() {
         
         try {
             await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS isBlocked BOOLEAN DEFAULT FALSE');
-        } catch (e) { /* ignore */ }
+        } catch (e) { }
 
-        // ✅ جدول النتائج (مع إضافة subjectId)
         await client.query(`
             CREATE TABLE IF NOT EXISTS quiz_results (
                 id SERIAL PRIMARY KEY,
@@ -82,12 +66,10 @@ async function initializeDatabase() {
             )
         `);
         
-        // إضافة عمود subjectId للجداول القديمة
         try {
             await client.query('ALTER TABLE quiz_results ADD COLUMN IF NOT EXISTS subjectId TEXT');
-        } catch (e) { /* ignore */ }
+        } catch (e) { }
 
-        // جدول سجلات الدخول
         await client.query(`
             CREATE TABLE IF NOT EXISTS login_logs (
                 id SERIAL PRIMARY KEY,
@@ -97,7 +79,6 @@ async function initializeDatabase() {
             )
         `);
 
-        // جدول الأنشطة
         await client.query(`
             CREATE TABLE IF NOT EXISTS activity_logs (
                 id SERIAL PRIMARY KEY,
@@ -108,7 +89,6 @@ async function initializeDatabase() {
             )
         `);
 
-        // جدول البصمات
         await client.query(`
             CREATE TABLE IF NOT EXISTS student_fingerprints (
                 id SERIAL PRIMARY KEY,
@@ -119,13 +99,22 @@ async function initializeDatabase() {
             )
         `);
 
-        // جدول البصمات المحظورة
         await client.query(`
             CREATE TABLE IF NOT EXISTS blocked_fingerprints (
                 id SERIAL PRIMARY KEY,
                 fingerprint TEXT UNIQUE NOT NULL,
                 reason TEXT,
                 createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS quiz_status (
+                id SERIAL PRIMARY KEY,
+                subjectId TEXT UNIQUE NOT NULL,
+                locked BOOLEAN DEFAULT FALSE,
+                message TEXT,
+                updatedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )
         `);
         
@@ -138,10 +127,6 @@ async function initializeDatabase() {
     }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Authentication Endpoints (مُصلحة)                                         */
-/* -------------------------------------------------------------------------- */
-
 app.post('/api/students/register', async (req, res) => {
     const { name, email, fingerprint } = req.body;
     
@@ -149,7 +134,6 @@ app.post('/api/students/register', async (req, res) => {
         return res.status(400).json({ error: 'البيانات ناقصة (الاسم أو البريد)' });
     }
 
-    // فحص حظر البصمة
     if (fingerprint) {
         try {
             const blockedCheck = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
@@ -162,14 +146,12 @@ app.post('/api/students/register', async (req, res) => {
     }
 
     try {
-        // محاولة التسجيل
         const result = await pool.query(
             'INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *',
             [name, email]
         );
         const newStudent = result.rows[0];
         
-        // حفظ البصمة
         if (fingerprint) {
             await pool.query(
                 'INSERT INTO student_fingerprints (studentId, fingerprint, lastSeen) VALUES ($1, $2, CURRENT_TIMESTAMP)',
@@ -187,7 +169,6 @@ app.post('/api/students/register', async (req, res) => {
         });
 
     } catch (err) {
-        // معالجة الإيميل المكرر
         if (err.code === '23505') { 
             try {
                 const existing = await pool.query('SELECT * FROM students WHERE email = $1', [email]);
@@ -197,7 +178,6 @@ app.post('/api/students/register', async (req, res) => {
                     return res.status(403).json({ error: 'هذا الحساب محظور من قبل الإدارة.' });
                 }
                 
-                // تحديث البصمة
                 if (fingerprint) {
                     await pool.query(
                         `INSERT INTO student_fingerprints (studentId, fingerprint, lastSeen) 
@@ -235,7 +215,6 @@ app.post('/api/login', async (req, res) => {
     }
 
     try {
-        // فحص البصمة
         if (fingerprint) {
             const blockedCheck = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
             if (blockedCheck.rows.length > 0) {
@@ -251,7 +230,6 @@ app.post('/api/login', async (req, res) => {
             );
         }
         
-        // تسجيل الدخول
         const result = await pool.query(
             'INSERT INTO login_logs (studentId) VALUES ($1) RETURNING id', 
             [studentId]
@@ -278,10 +256,6 @@ app.post('/api/logout', async (req, res) => {
     }
 });
 
-/* -------------------------------------------------------------------------- */
-/* Student Data Endpoints (مُصلحة)                                           */
-/* -------------------------------------------------------------------------- */
-
 app.get('/api/students/:id', async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM students WHERE id = $1', [req.params.id]);
@@ -295,7 +269,6 @@ app.get('/api/students/:id', async (req, res) => {
     }
 });
 
-// ✅ حفظ نتيجة اختبار (مُصلح)
 app.post('/api/quiz-results', async (req, res) => {
     const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
     
@@ -351,7 +324,6 @@ app.get('/api/students/:id/stats', async (req, res) => {
     }
 });
 
-// ✅ تسجيل نشاط (مُصلح)
 app.post('/api/log-activity', async (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
     
@@ -371,9 +343,47 @@ app.post('/api/log-activity', async (req, res) => {
     }
 });
 
-/* -------------------------------------------------------------------------- */
-/* Admin Dashboard Endpoints                                                 */
-/* -------------------------------------------------------------------------- */
+app.get('/api/quiz-status', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM quiz_status');
+        const statusMap = {};
+        result.rows.forEach(row => {
+            statusMap[row.subjectid] = {
+                locked: row.locked,
+                message: row.message
+            };
+        });
+        res.json(statusMap);
+    } catch (e) {
+        console.error('❌ خطأ في جلب حالة الاختبارات:', e);
+        res.json({});
+    }
+});
+
+app.post('/api/admin/quiz-status/:subjectId', async (req, res) => {
+    const { subjectId } = req.params;
+    const { locked, message } = req.body;
+
+    if (locked === undefined) {
+        return res.status(400).json({ error: 'حالة القفل مطلوبة' });
+    }
+
+    try {
+        await pool.query(
+            `INSERT INTO quiz_status (subjectId, locked, message, updatedAt) 
+             VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+             ON CONFLICT (subjectId) 
+             DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP`,
+            [subjectId, locked, message || null]
+        );
+        
+        console.log(`🔒 تحديث حالة الاختبار: ${subjectId} -> ${locked ? 'مقفل' : 'مفتوح'}`);
+        res.json({ message: 'تم تحديث حالة الاختبار بنجاح' });
+    } catch (e) {
+        console.error('❌ خطأ في تحديث حالة الاختبار:', e);
+        res.status(500).json({ error: 'خطأ في التحديث' });
+    }
+});
 
 app.get('/api/admin/students', async (req, res) => {
     try {
@@ -428,10 +438,6 @@ app.get('/api/admin/activity-logs', async (req, res) => {
         res.status(500).json({ error: 'خطأ في الأنشطة' }); 
     }
 });
-
-/* -------------------------------------------------------------------------- */
-/* Blocking System Endpoints                                                 */
-/* -------------------------------------------------------------------------- */
 
 app.post('/api/admin/students/:id/status', async (req, res) => {
     const { id } = req.params;
@@ -513,17 +519,13 @@ app.post('/api/admin/students/:id/unblock-fingerprint', async (req, res) => {
     }
 });
 
-/* -------------------------------------------------------------------------- */
-/* Health Check & Server Start                                               */
-/* -------------------------------------------------------------------------- */
-
 app.get('/api/health', (req, res) => {
     res.json({ status: 'OK', message: 'Server is running correctly ✅' });
 });
 
 app.listen(PORT, () => {
     console.log(`\n🚀 ═══════════════════════════════════════════════════`);
-    console.log(`   Tawal Academy Backend Server v2.0.0`);
+    console.log(`   Tawal Academy Backend Server v2.1.0`);
     console.log(`   🌐 Server running on port: ${PORT}`);
     console.log(`   📡 API URL: http://localhost:${PORT}/api`);
     console.log(`   ✅ Health Check: http://localhost:${PORT}/api/health`);
