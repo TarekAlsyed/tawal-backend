@@ -1,6 +1,7 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 3.1.0 (Added: Admin Reply System)
+ * SERVER.JS - Tawal Academy Backend API
+ * Version: 3.1.0 (FINAL: Messaging Reply System + Fixes)
  * =================================================================================
  */
 
@@ -10,6 +11,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const { Pool, types } = require('pg');
 
+// إصلاح مشاكل التوقيت في Postgres
 types.setTypeParser(1114, (stringValue) => stringValue);
 types.setTypeParser(1184, (stringValue) => stringValue);
 
@@ -26,7 +28,7 @@ app.use(cors(corsOptions));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// منع الكاش
+// 🔥 هام جداً: منع الكاش نهائياً
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.set('Pragma', 'no-cache');
@@ -39,10 +41,13 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
+// ---------------------------------------------------------------------------------
+// 1. تهيئة قاعدة البيانات
+// ---------------------------------------------------------------------------------
 async function initializeDatabase() {
     const client = await pool.connect();
     try {
-        console.log('🔄 [DB] Updating tables...');
+        console.log('🔄 [DB] Checking tables...');
         
         // الجداول الأساسية
         await client.query(`CREATE TABLE IF NOT EXISTS students (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, isBlocked BOOLEAN DEFAULT FALSE)`);
@@ -50,8 +55,8 @@ async function initializeDatabase() {
         
         try { await client.query('ALTER TABLE quiz_results ADD COLUMN IF NOT EXISTS subjectId TEXT'); } catch (e) { }
         try { await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS isBlocked BOOLEAN DEFAULT FALSE'); } catch (e) { }
-
-        // ✅ تعديل جدول الرسائل لإضافة خانة الرد
+        
+        // ✅ جدول الرسائل (مع عمود الرد الجديد)
         await client.query(`CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), content TEXT NOT NULL, adminReply TEXT, isRead BOOLEAN DEFAULT FALSE, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
         try { await client.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS adminReply TEXT'); } catch (e) { }
 
@@ -66,16 +71,20 @@ async function initializeDatabase() {
     } catch (err) { console.error('❌ [DB] Error:', err); } finally { client.release(); }
 }
 
-// ... (نفس أكواد التسجيل والطلاب دون تغيير) ...
+// ---------------------------------------------------------------------------------
+// 2. إدارة الطلاب (Auth)
+// ---------------------------------------------------------------------------------
 app.post('/api/students/register', async (req, res) => {
     const { name, email, fingerprint } = req.body;
     if (!name || !email) return res.status(400).json({ error: 'بيانات ناقصة' });
+
     if (fingerprint) {
         try {
             const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
             if (blocked.rows.length > 0) return res.status(403).json({ error: 'جهاز محظور' });
         } catch (e) {}
     }
+
     try {
         const result = await pool.query('INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *', [name, email]);
         const newStudent = result.rows[0];
@@ -91,6 +100,7 @@ app.post('/api/students/register', async (req, res) => {
         res.status(500).json({ error: 'Server Error' });
     }
 });
+
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
     try {
@@ -103,6 +113,7 @@ app.post('/api/login', async (req, res) => {
         res.json({ logId: result.rows[0].id });
     } catch (e) { res.status(500).json({ error: 'Login Error' }); }
 });
+
 app.get('/api/students/:id', async (req, res) => {
     try {
         const resDb = await pool.query('SELECT * FROM students WHERE id = $1', [req.params.id]);
@@ -111,9 +122,9 @@ app.get('/api/students/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// --- ✅ تعديلات نظام الرسائل والردود ---
-
-// إرسال رسالة من الطالب
+// ---------------------------------------------------------------------------------
+// 3. نظام الرسائل والردود (Messaging System)
+// ---------------------------------------------------------------------------------
 app.post('/api/messages', async (req, res) => {
     try {
         await pool.query('INSERT INTO messages (studentId, content) VALUES ($1, $2)', [req.body.studentId, req.body.message]);
@@ -121,7 +132,7 @@ app.post('/api/messages', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// ✅ جلب رسائل الطالب + ردود الأدمن (ليراها الطالب)
+// ✅ جلب أرشيف رسائل الطالب
 app.get('/api/students/:id/messages', async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM messages WHERE studentId = $1 ORDER BY createdAt DESC LIMIT 20', [req.params.id]);
@@ -129,7 +140,7 @@ app.get('/api/students/:id/messages', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// جلب كل الرسائل للأدمن
+// ✅ جلب الرسائل للأدمن (مع إصلاح الاسم)
 app.get('/api/admin/messages', async (req, res) => {
     try {
         const result = await pool.query(`
@@ -140,10 +151,10 @@ app.get('/api/admin/messages', async (req, res) => {
             LIMIT 100
         `);
         res.json(result.rows || []);
-    } catch (e) { res.status(500).json({ error: 'Error' }); }
+    } catch (e) { console.error(e); res.status(500).json({ error: 'Error fetching messages' }); }
 });
 
-// ✅ الأدمن يرد على رسالة
+// ✅ الرد على الرسالة
 app.post('/api/admin/messages/:id/reply', async (req, res) => {
     try {
         await pool.query('UPDATE messages SET adminReply = $1 WHERE id = $2', [req.body.reply, req.params.id]);
@@ -156,7 +167,9 @@ app.delete('/api/admin/messages/:id', async (req, res) => {
     catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// ... (نفس باقي الأكواد للنتائج والقفل والإحصائيات) ...
+// ---------------------------------------------------------------------------------
+// 4. النتائج والإحصائيات
+// ---------------------------------------------------------------------------------
 app.post('/api/quiz-results', async (req, res) => {
     try {
         await pool.query('INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5, $6)', 
@@ -164,12 +177,14 @@ app.post('/api/quiz-results', async (req, res) => {
         res.json({ message: 'Saved' });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
 app.get('/api/students/:id/results', async (req, res) => {
     try {
         const r = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1 ORDER BY completedAt DESC', [req.params.id]);
         res.json(r.rows);
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
 app.get('/api/students/:id/stats', async (req, res) => {
     try {
         const r = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1', [req.params.id]);
@@ -182,6 +197,10 @@ app.get('/api/students/:id/stats', async (req, res) => {
         });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
+// ---------------------------------------------------------------------------------
+// 5. نظام القفل
+// ---------------------------------------------------------------------------------
 app.get('/api/quiz-status', async (req, res) => {
     try {
         const r = await pool.query('SELECT * FROM quiz_status');
@@ -189,6 +208,7 @@ app.get('/api/quiz-status', async (req, res) => {
         res.json(map);
     } catch (e) { res.json({}); }
 });
+
 app.post('/api/admin/quiz-status/:subjectId', async (req, res) => {
     try {
         await pool.query(`INSERT INTO quiz_status (subjectId, locked, message, updatedAt) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (subjectId) DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP`, 
@@ -196,10 +216,15 @@ app.post('/api/admin/quiz-status/:subjectId', async (req, res) => {
         res.json({ message: 'Updated' });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
+// ---------------------------------------------------------------------------------
+// 6. لوحة التحكم
+// ---------------------------------------------------------------------------------
 app.get('/api/admin/students', async (req, res) => {
     try { const r = await pool.query('SELECT * FROM students ORDER BY createdAt DESC'); res.json(r.rows); } 
     catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
 app.get('/api/admin/stats', async (req, res) => {
     try {
         const s = await pool.query('SELECT COUNT(*) as t FROM students');
@@ -207,18 +232,23 @@ app.get('/api/admin/stats', async (req, res) => {
         res.json({ totalStudents: parseInt(s.rows[0].t), totalQuizzes: parseInt(q.rows[0].t), averageScore: Math.round(q.rows[0].a || 0) });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
 app.get('/api/admin/activity-logs', async (req, res) => {
     try { const r = await pool.query(`SELECT act.id, s.name, act.activityType, act.subjectName, act.timestamp FROM activity_logs act JOIN students s ON act.studentId = s.id ORDER BY act.timestamp DESC LIMIT 50`); res.json(r.rows); } 
     catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
 app.get('/api/admin/login-logs', async (req, res) => {
     try { const r = await pool.query(`SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime FROM login_logs ll JOIN students s ON ll.studentId = s.id ORDER BY ll.loginTime DESC LIMIT 50`); res.json(r.rows); } 
     catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
+// حظر
 app.post('/api/admin/students/:id/status', async (req, res) => {
     try { await pool.query('UPDATE students SET isblocked = $1 WHERE id = $2', [req.body.isblocked, req.params.id]); res.json({ message: 'Updated' }); } 
     catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
 app.post('/api/admin/students/:id/block-fingerprint', async (req, res) => {
     try {
         const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]);
@@ -227,6 +257,7 @@ app.post('/api/admin/students/:id/block-fingerprint', async (req, res) => {
         res.json({ message: 'Blocked' });
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
+
 app.post('/api/admin/students/:id/unblock-fingerprint', async (req, res) => {
     try {
         const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]);
