@@ -1,6 +1,7 @@
 /*
  * =================================================================================
  * SERVER.JS - Version 13.0.0 (PLATINUM EDITION: High Security & Logic Fixes)
+ * Updated to include DELETE Student Endpoint
  * =================================================================================
  */
 
@@ -87,6 +88,9 @@ async function initializeDatabase() {
         // جداول السجلات
         await client.query(`CREATE TABLE IF NOT EXISTS login_logs (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), loginTime TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, logoutTime TIMESTAMPTZ)`);
         
+        // جداول نشاط الطلاب (للحذف الشامل)
+        await client.query(`CREATE TABLE IF NOT EXISTS activity_logs (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), activityType TEXT NOT NULL, subjectName TEXT, timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
+
         // جداول الحماية والبصمة
         await client.query(`CREATE TABLE IF NOT EXISTS student_fingerprints (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), fingerprint TEXT NOT NULL, lastSeen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, UNIQUE(studentId, fingerprint))`);
         await client.query(`CREATE TABLE IF NOT EXISTS blocked_fingerprints (id SERIAL PRIMARY KEY, fingerprint TEXT UNIQUE NOT NULL, reason TEXT, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
@@ -391,6 +395,43 @@ app.get('/api/admin/login-logs', authenticateAdmin, async (req, res) => {
         const r = await pool.query(`SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime FROM login_logs ll JOIN students s ON ll.studentId = s.id ORDER BY ll.loginTime DESC LIMIT 50`); 
         res.json(r.rows); 
     } catch (e) { res.status(500).json({ error: 'Error fetching logs' }); } 
+});
+
+// ✅🔥🔥 [إضافة جديدة] حذف الطالب نهائياً (تنظيف شامل للقاعدة)
+app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN'); // بدء المعاملة (Transaction) لضمان الحذف الكامل أو لا شيء
+        const studentId = req.params.id;
+
+        // 1. حذف البصمات المرتبطة
+        await client.query('DELETE FROM student_fingerprints WHERE studentId = $1', [studentId]);
+        // 2. حذف نتائج الاختبارات
+        await client.query('DELETE FROM quiz_results WHERE studentId = $1', [studentId]);
+        // 3. حذف الرسائل
+        await client.query('DELETE FROM messages WHERE studentId = $1', [studentId]);
+        // 4. حذف سجلات الدخول
+        await client.query('DELETE FROM login_logs WHERE studentId = $1', [studentId]);
+        // 5. حذف سجلات النشاط (إن وجدت في التحديث الجديد)
+        await client.query('DELETE FROM activity_logs WHERE studentId = $1', [studentId]);
+
+        // 6. وأخيراً حذف الطالب نفسه
+        const result = await client.query('DELETE FROM students WHERE id = $1 RETURNING *', [studentId]);
+
+        if (result.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Student not found' });
+        }
+
+        await client.query('COMMIT'); // اعتماد الحذف
+        res.json({ message: 'Student and all related data deleted successfully' });
+    } catch (e) {
+        await client.query('ROLLBACK'); // التراجع في حالة حدوث خطأ
+        console.error('Delete Error:', e);
+        res.status(500).json({ error: 'Failed to delete student' });
+    } finally {
+        client.release();
+    }
 });
 
 // فحص الصحة (Health Check)
