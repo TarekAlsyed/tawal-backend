@@ -1,7 +1,7 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 15.0.0 (PLATINUM EDITION: Optimized & Compressed)
- * Updated to fix Critical Performance & Data Issues
+ * SERVER.JS - Version 15.1.0 (PLATINUM EDITION: Optimized Activity Logs)
+ * Updated to fix Dashboard Loading Issues
  * =================================================================================
  */
 
@@ -14,32 +14,27 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const compression = require('compression'); // ✅ [New] لإصلاح مشاكل الأداء
+const compression = require('compression'); 
 
 // إعداد التطبيق
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// 1. إعدادات الأمان (Security Headers)
+// 1. إعدادات الأمان
 app.use(helmet());
-
-// ✅ [New] تفعيل ضغط الملفات لتسريع التحميل (Fix Performance Issue #14)
 app.use(compression());
 
-// 2. إعدادات CORS (محسنة وآمنة جداً)
+// 2. إعدادات CORS
 const allowedOrigins = [
     'https://tarekalsyed.github.io', 
     'http://localhost:3000', 
-    'http://127.0.0.1:5500',
+    'http://127.0.0.1:5500', 
     'http://127.0.0.1:3000'
 ];
 
 app.use(cors({
     origin: function (origin, callback) {
-        // السماح للطلبات التي ليس لها مصدر (مثل تطبيقات الموبايل، Postman، أو السيرفر نفسه)
         if (!origin) return callback(null, true);
-        
-        // التحقق مما إذا كان المصدر في القائمة المسموحة
         if (allowedOrigins.some(domain => origin.startsWith(domain) || origin === domain)) {
             callback(null, true);
         } else {
@@ -47,270 +42,176 @@ app.use(cors({
             callback(new Error('Not allowed by CORS policy'));
         }
     },
-    credentials: true, // السماح بالكوكيز والتوكن
+    credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// 3. معالجة البيانات (Body Parser)
-// ✅ تم الإبقاء على 50kb كحد أقصى للحماية من هجمات الإغراق (DoS)
+// 3. معالجة البيانات
 app.use(bodyParser.json({ limit: '50kb' })); 
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// 4. الاتصال بقاعدة البيانات (PostgreSQL)
+// 4. الاتصال بقاعدة البيانات
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false } // ضروري للاستضافات السحابية مثل Railway
+    ssl: { rejectUnauthorized: false }
 });
 
-// 5. نظام الحد من الطلبات (Rate Limiting)
+// 5. Rate Limiting
 const generalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 دقيقة
-    max: 3000, // الحد الحالي (يمكن تقليله إلى 500 إذا تعرض الموقع لهجوم)
+    windowMs: 15 * 60 * 1000, 
+    max: 3000, 
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
 app.use('/api/', generalLimiter);
 
-// =================================================================
-// دالة تهيئة قاعدة البيانات (إنشاء الجداول)
-// =================================================================
+// تهيئة قاعدة البيانات
 async function initializeDatabase() {
     const client = await pool.connect();
     try {
         console.log('🔄 [DB] Checking tables & connection...');
-        
-        // جداول الطلاب والنتائج
         await client.query(`CREATE TABLE IF NOT EXISTS students (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, isBlocked BOOLEAN DEFAULT FALSE)`);
-        
-        // تم تحديث جدول النتائج ليقبل أرقاماً عشرية للنسبة المئوية إذا لزم الأمر، لكن INTEGER كافٍ للنسبة
         await client.query(`CREATE TABLE IF NOT EXISTS quiz_results (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), quizName TEXT NOT NULL, subjectId TEXT, score INTEGER NOT NULL, totalQuestions INTEGER NOT NULL, correctAnswers INTEGER NOT NULL, completedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
-        
-        // جدول الرسائل
         await client.query(`CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), content TEXT NOT NULL, adminReply TEXT, isRead BOOLEAN DEFAULT FALSE, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
-        
-        // جداول السجلات
         await client.query(`CREATE TABLE IF NOT EXISTS login_logs (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), loginTime TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, logoutTime TIMESTAMPTZ)`);
-        
-        // جداول نشاط الطلاب (للحذف الشامل)
         await client.query(`CREATE TABLE IF NOT EXISTS activity_logs (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), activityType TEXT NOT NULL, subjectName TEXT, timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
-
-        // جداول الحماية والبصمة
         await client.query(`CREATE TABLE IF NOT EXISTS student_fingerprints (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), fingerprint TEXT NOT NULL, lastSeen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, UNIQUE(studentId, fingerprint))`);
         await client.query(`CREATE TABLE IF NOT EXISTS blocked_fingerprints (id SERIAL PRIMARY KEY, fingerprint TEXT UNIQUE NOT NULL, reason TEXT, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
-        
-        // جدول حالة الاختبارات
         await client.query(`CREATE TABLE IF NOT EXISTS quiz_status (id SERIAL PRIMARY KEY, subjectId TEXT UNIQUE NOT NULL, locked BOOLEAN DEFAULT FALSE, message TEXT, updatedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
-
         console.log('✅ [DB] Database Ready & Secured.');
-    } catch (err) { 
-        console.error('❌ [DB] Critical Error:', err); 
-    } finally { 
-        client.release(); 
-    }
+    } catch (err) { console.error('❌ [DB] Critical Error:', err); } 
+    finally { client.release(); }
 }
 
-// =================================================================
-// Middleware: التحقق من صلاحيات الأدمن (JWT)
-// =================================================================
+// Middleware للأدمن
 function authenticateAdmin(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) return res.status(401).json({ error: 'Unauthorized: No token provided' });
-
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: 'Forbidden: Invalid or expired token' });
-        if (user.role !== 'admin') return res.status(403).json({ error: 'Forbidden: Admin access required' });
+        if (err) return res.status(403).json({ error: 'Forbidden' });
+        if (user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
         req.user = user;
         next();
     });
 }
 
-// =================================================================
-// API Endpoints
-// =================================================================
+// ================= API Endpoints =================
 
-// 1. تسجيل دخول الأدمن
+// Admin Login
 app.post('/api/admin/login', async (req, res) => {
     const { password } = req.body;
     const adminHash = process.env.ADMIN_PASSWORD_HASH;
-
-    if (!adminHash) return res.status(500).json({ error: 'Server Config Error: ADMIN_PASSWORD_HASH missing' });
-
-    const isMatch = await bcrypt.compare(password, adminHash);
-    if (isMatch) {
+    if (!adminHash) return res.status(500).json({ error: 'Config Error' });
+    if (await bcrypt.compare(password, adminHash)) {
         const token = jwt.sign({ role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '24h' });
-        res.json({ token, message: 'Login successful' });
+        res.json({ token });
     } else {
-        res.status(401).json({ error: 'كلمة المرور غير صحيحة' });
+        res.status(401).json({ error: 'Wrong password' });
     }
 });
 
-// 2. التحقق من البصمة (Fingerprint Check)
+// Fingerprint Check
 app.post('/api/verify-fingerprint', async (req, res) => {
     const { fingerprint } = req.body;
     if (!fingerprint) return res.status(400).json({ ok: false });
-
     try {
         const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
         if (blocked.rows.length > 0) return res.status(403).json({ ok: false, message: 'Device Blocked' });
         res.json({ ok: true });
-    } catch (e) {
-        res.status(500).json({ ok: false });
-    }
+    } catch (e) { res.status(500).json({ ok: false }); }
 });
 
-// 3. تسجيل الطلاب
+// Student Register
 app.post('/api/students/register', async (req, res) => {
     const { name, email, fingerprint } = req.body;
     if (!name || !email) return res.status(400).json({ error: 'Missing data' });
-
-    // التحقق من الحظر قبل التسجيل
     if (fingerprint) {
         const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
         if (blocked.rows.length > 0) return res.status(403).json({ error: 'Device Blocked' });
     }
-
     try {
         const result = await pool.query('INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *', [name, email]);
         const newStudent = result.rows[0];
-        
-        if (fingerprint) {
-            await pool.query('INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2)', [newStudent.id, fingerprint]);
-        }
+        if (fingerprint) await pool.query('INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2)', [newStudent.id, fingerprint]);
         res.json(newStudent);
     } catch (err) {
-        if (err.code === '23505') { // تكرار الإيميل
+        if (err.code === '23505') {
             const existing = await pool.query('SELECT * FROM students WHERE email = $1', [email]);
             if (existing.rows[0].isblocked) return res.status(403).json({ error: 'Account Blocked' });
             return res.json(existing.rows[0]);
         }
-        res.status(500).json({ error: 'Server Error during registration' });
+        res.status(500).json({ error: 'Error' });
     }
 });
 
-// 4. نظام الرسائل (مع إصلاح منطق العد الدقيق)
+// Messages
 app.post('/api/messages', async (req, res) => {
     const { studentId, message } = req.body;
     if (!studentId || !message) return res.status(400).json({ error: 'Missing data' });
-
-    const DAILY_LIMIT = 3;
-
     try {
-        // حساب عدد الرسائل لهذا الطالب "اليوم"
-        const countQuery = await pool.query(
-            "SELECT COUNT(*) FROM messages WHERE studentId = $1 AND createdAt >= CURRENT_DATE",
-            [studentId]
-        );
-        const count = parseInt(countQuery.rows[0].count);
-        
-        if (count >= DAILY_LIMIT) {
-            return res.status(429).json({ 
-                error: 'عفواً، لقد استنفذت رصيد الرسائل اليومي (3 رسائل).',
-                remaining: 0
-            });
-        }
-
+        const countQuery = await pool.query("SELECT COUNT(*) FROM messages WHERE studentId = $1 AND createdAt >= CURRENT_DATE", [studentId]);
+        if (parseInt(countQuery.rows[0].count) >= 3) return res.status(429).json({ error: 'Limit reached', remaining: 0 });
         await pool.query('INSERT INTO messages (studentId, content) VALUES ($1, $2)', [studentId, message]);
-        
-        // إرجاع العدد المتبقي بدقة
-        // إذا كان الحد 3، وكان لديه 0، وأرسل واحدة، يصبح لديه 1. المتبقي = 3 - 1 = 2
-        res.json({ 
-            message: 'Sent', 
-            remaining: DAILY_LIMIT - (count + 1)
-        });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: 'Error sending message' });
-    }
+        res.json({ message: 'Sent', remaining: 3 - (parseInt(countQuery.rows[0].count) + 1) });
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
 app.get('/api/students/:id/messages', async (req, res) => {
     try { 
         const r = await pool.query('SELECT * FROM messages WHERE studentId = $1 ORDER BY createdAt DESC', [req.params.id]); 
-        
-        // حساب المتبقي بنفس منطق السيرفر
         const now = new Date();
-        const startOfDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
-        const todayCount = r.rows.filter(m => new Date(m.createdat) >= new Date(startOfDay)).length;
-
-        res.json({
-            messages: r.rows,
-            remaining: Math.max(0, 3 - todayCount)
-        });
+        const todayCount = r.rows.filter(m => new Date(m.createdat) >= new Date(now.setHours(0,0,0,0))).length;
+        res.json({ messages: r.rows, remaining: Math.max(0, 3 - todayCount) });
     } catch(e) { res.status(500).json([]); }
 });
 
-// 5. تسجيل الدخول (Logs)
+// Login Log
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
     try {
         if (fingerprint) {
             const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
             if (blocked.rows.length > 0) return res.status(403).json({ error: 'Device Blocked' });
-            
-            // تحديث وقت آخر ظهور للجهاز
             await pool.query(`INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2) ON CONFLICT (studentId, fingerprint) DO UPDATE SET lastSeen=CURRENT_TIMESTAMP`, [studentId, fingerprint]);
         }
         await pool.query('INSERT INTO login_logs (studentId) VALUES ($1)', [studentId]);
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Login Error' }); }
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// 6. حفظ نتائج الاختبارات
+// Quiz Results
 app.post('/api/quiz-results', async (req, res) => {
     try { 
-        // studentId, quizName, subjectId, score (percentage), totalQuestions, correctAnswers
-        await pool.query(
-            'INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5, $6)', 
-            [req.body.studentId, req.body.quizName, req.body.subjectId, req.body.score, req.body.totalQuestions, req.body.correctAnswers]
-        ); 
-        res.json({ message: 'Result Saved' }); 
-    } catch (e) { 
-        console.error('Save Quiz Error:', e);
-        res.status(500).json({ error: 'Error saving result' }); 
-    }
+        await pool.query('INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5, $6)', 
+            [req.body.studentId, req.body.quizName, req.body.subjectId, req.body.score, req.body.totalQuestions, req.body.correctAnswers]); 
+        res.json({ message: 'Saved' }); 
+    } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// 7. جلب بيانات الطالب
 app.get('/api/students/:id', async (req, res) => { 
-    try { 
-        const r = await pool.query('SELECT * FROM students WHERE id = $1', [req.params.id]); 
-        res.json(r.rows[0] || {}); 
-    } catch(e) { res.status(500).json({}); } 
+    try { const r = await pool.query('SELECT * FROM students WHERE id = $1', [req.params.id]); res.json(r.rows[0] || {}); } 
+    catch(e) { res.status(500).json({}); } 
 });
 
 app.get('/api/students/:id/results', async (req, res) => { 
-    try { 
-        // ✅ يتم إرجاع التواريخ بتنسيق ISO 8601 القياسي (Fix Issue #2)
-        const r = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1 ORDER BY completedAt DESC', [req.params.id]); 
-        res.json(r.rows); 
-    } catch (e) { res.status(500).json({ error: 'Error fetching results' }); } 
+    try { const r = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1 ORDER BY completedAt DESC', [req.params.id]); res.json(r.rows); } 
+    catch (e) { res.status(500).json({ error: 'Error' }); } 
 });
 
 app.get('/api/students/:id/stats', async (req, res) => { 
     try { 
         const r = await pool.query('SELECT score FROM quiz_results WHERE studentId = $1', [req.params.id]); 
         const rs = r.rows; 
-        
         if (!rs.length) return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0 }); 
-        
-        const total = rs.length;
-        // حساب المتوسط بشكل صحيح (النقاط هي نسبة مئوية أصلاً)
-        const avg = Math.round(rs.reduce((sum, row) => sum + row.score, 0) / total);
+        const avg = Math.round(rs.reduce((sum, row) => sum + row.score, 0) / rs.length);
         const best = Math.max(...rs.map(r => r.score));
-
-        res.json({ 
-            totalQuizzes: total, 
-            averageScore: avg, 
-            bestScore: best 
-        }); 
-    } catch (e) { res.status(500).json({ error: 'Error calculating stats' }); } 
+        res.json({ totalQuizzes: rs.length, averageScore: avg, bestScore: best }); 
+    } catch (e) { res.status(500).json({ error: 'Error' }); } 
 });
 
-// 8. حالة الاختبارات (عام)
 app.get('/api/quiz-status', async (req, res) => { 
     try { 
         const r = await pool.query('SELECT * FROM quiz_status'); 
@@ -320,11 +221,31 @@ app.get('/api/quiz-status', async (req, res) => {
     } catch (e) { res.json({}); } 
 });
 
-// =================================================================
-// وظائف الأدمن (محمية بـ authenticateAdmin)
-// =================================================================
+// ================= Admin Routes =================
 
-// إدارة الرسائل
+// ✅ [NEW] Endpoint لجلب أحدث الأنشطة بسرعة (Fix Performance Issue)
+app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
+    try {
+        // نقوم بدمج (JOIN) جدول النتائج مع جدول الطلاب لجلب الاسم
+        const query = `
+            SELECT 
+                s.name as "studentName",
+                q.quizName,
+                q.score,
+                q.completedAt as "date"
+            FROM quiz_results q
+            JOIN students s ON q.studentId = s.id
+            ORDER BY q.completedAt DESC
+            LIMIT 20
+        `;
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'Failed to fetch activity logs' });
+    }
+});
+
 app.get('/api/admin/messages', authenticateAdmin, async (req, res) => {
     try { 
         const r = await pool.query(`SELECT m.id, m.content, m.adminReply, m.createdAt, s.name as "studentName" FROM messages m JOIN students s ON m.studentId = s.id ORDER BY m.createdAt DESC LIMIT 100`); 
@@ -342,20 +263,14 @@ app.delete('/api/admin/messages/:id', authenticateAdmin, async (req, res) => {
     catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// إحصائيات عامة
 app.get('/api/admin/stats', authenticateAdmin, async (req, res) => { 
     try { 
         const s = await pool.query('SELECT COUNT(*) as t FROM students'); 
         const q = await pool.query('SELECT COUNT(*) as t, AVG(score) as a FROM quiz_results'); 
-        res.json({ 
-            totalStudents: parseInt(s.rows[0].t), 
-            totalQuizzes: parseInt(q.rows[0].t), 
-            averageScore: Math.round(q.rows[0].a || 0) 
-        }); 
+        res.json({ totalStudents: parseInt(s.rows[0].t), totalQuizzes: parseInt(q.rows[0].t), averageScore: Math.round(q.rows[0].a || 0) }); 
     } catch (e) { res.status(500).json({ error: 'Error' }); } 
 });
 
-// إدارة الطلاب والحظر
 app.get('/api/admin/students', authenticateAdmin, async (req, res) => { 
     try { const r = await pool.query('SELECT * FROM students ORDER BY createdAt DESC'); res.json(r.rows); } 
     catch (e) { res.status(500).json({ error: 'Error' }); } 
@@ -369,81 +284,58 @@ app.post('/api/admin/students/:id/status', authenticateAdmin, async (req, res) =
 app.post('/api/admin/students/:id/block-fingerprint', authenticateAdmin, async (req, res) => { 
     try { 
         const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]); 
-        if (!fp.rows.length) return res.status(404).json({ error: 'No device found for this student' }); 
-        
+        if (!fp.rows.length) return res.status(404).json({ error: 'No device found' }); 
         await pool.query('INSERT INTO blocked_fingerprints (fingerprint, reason) VALUES ($1, $2) ON CONFLICT DO NOTHING', [fp.rows[0].fingerprint, 'Admin Block']); 
-        res.json({ message: 'Device Blocked' }); 
-    } catch (e) { res.status(500).json({ error: 'Error blocking device' }); } 
+        res.json({ message: 'Blocked' }); 
+    } catch (e) { res.status(500).json({ error: 'Error' }); } 
 });
 
 app.post('/api/admin/students/:id/unblock-fingerprint', authenticateAdmin, async (req, res) => { 
     try { 
         const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]); 
         if (!fp.rows.length) return res.status(404).json({ error: 'No device found' }); 
-        
         await pool.query('DELETE FROM blocked_fingerprints WHERE fingerprint = $1', [fp.rows[0].fingerprint]); 
-        res.json({ message: 'Device Unblocked' }); 
-    } catch (e) { res.status(500).json({ error: 'Error unblocking' }); } 
+        res.json({ message: 'Unblocked' }); 
+    } catch (e) { res.status(500).json({ error: 'Error' }); } 
 });
 
-// التحكم في الأقفال
 app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res) => { 
     try { 
         await pool.query(`INSERT INTO quiz_status (subjectId, locked, message, updatedAt) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (subjectId) DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP`, [req.params.subjectId, req.body.locked, req.body.message]); 
-        res.json({ message: 'Lock Updated' }); 
-    } catch (e) { res.status(500).json({ error: 'Error updating lock' }); } 
+        res.json({ message: 'Updated' }); 
+    } catch (e) { res.status(500).json({ error: 'Error' }); } 
 });
 
-// سجلات الدخول
 app.get('/api/admin/login-logs', authenticateAdmin, async (req, res) => { 
     try { 
-        // جلب آخر 50 عملية تسجيل دخول
         const r = await pool.query(`SELECT ll.id, s.name, s.email, ll.loginTime, ll.logoutTime FROM login_logs ll JOIN students s ON ll.studentId = s.id ORDER BY ll.loginTime DESC LIMIT 50`); 
         res.json(r.rows); 
-    } catch (e) { res.status(500).json({ error: 'Error fetching logs' }); } 
+    } catch (e) { res.status(500).json({ error: 'Error' }); } 
 });
 
-// ✅🔥🔥 حذف الطالب نهائياً (تنظيف شامل للقاعدة)
 app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
     const client = await pool.connect();
     try {
-        await client.query('BEGIN'); // بدء المعاملة (Transaction)
+        await client.query('BEGIN');
         const studentId = req.params.id;
-
-        // 1. حذف البصمات المرتبطة
         await client.query('DELETE FROM student_fingerprints WHERE studentId = $1', [studentId]);
-        // 2. حذف نتائج الاختبارات
         await client.query('DELETE FROM quiz_results WHERE studentId = $1', [studentId]);
-        // 3. حذف الرسائل
         await client.query('DELETE FROM messages WHERE studentId = $1', [studentId]);
-        // 4. حذف سجلات الدخول
         await client.query('DELETE FROM login_logs WHERE studentId = $1', [studentId]);
-        // 5. حذف سجلات النشاط
         await client.query('DELETE FROM activity_logs WHERE studentId = $1', [studentId]);
-
-        // 6. وأخيراً حذف الطالب نفسه
         const result = await client.query('DELETE FROM students WHERE id = $1 RETURNING *', [studentId]);
-
-        if (result.rowCount === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Student not found' });
-        }
-
-        await client.query('COMMIT'); // اعتماد الحذف
-        res.json({ message: 'Student and all related data deleted successfully' });
+        if (result.rowCount === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Student not found' }); }
+        await client.query('COMMIT');
+        res.json({ message: 'Deleted' });
     } catch (e) {
-        await client.query('ROLLBACK'); // التراجع في حالة حدوث خطأ
-        console.error('Delete Error:', e);
-        res.status(500).json({ error: 'Failed to delete student' });
-    } finally {
-        client.release();
-    }
+        await client.query('ROLLBACK');
+        console.error(e);
+        res.status(500).json({ error: 'Error' });
+    } finally { client.release(); }
 });
 
-// فحص الصحة (Health Check)
-app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '15.0.0', compression: true }));
+app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '15.1.0' }));
 
-// بدء تشغيل السيرفر
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     initializeDatabase();
