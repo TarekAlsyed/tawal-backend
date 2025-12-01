@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 15.2.0 (Diamond Edition: Debugging & Fixes)
+ * SERVER.JS - Version 15.3.0 (Diamond Edition: CORS FIXED)
  * =================================================================================
  */
 
@@ -15,42 +15,35 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const compression = require('compression'); 
 
-// Application Setup
+// إعداد التطبيق
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// 1. Security Headers
+// 1. إعدادات الأمان
 app.use(helmet());
 app.use(compression());
 
-// 2. CORS Setup
-const allowedOrigins = [
-    'https://tarekalsyed.github.io', 
-    'http://localhost:3000', 
-    'http://127.0.0.1:5500', 
-    'http://127.0.0.1:3000'
-];
-
+// ✅✅✅ إصلاح مشكلة CORS الجذري ✅✅✅
+// تم تبسيط الإعدادات للسماح لموقعك بالاتصال فوراً
 app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.some(domain => origin.startsWith(domain) || origin === domain)) {
-            callback(null, true);
-        } else {
-            console.warn(`⛔ Blocked CORS request from: ${origin}`);
-            callback(new Error('Not allowed by CORS policy'));
-        }
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    origin: [
+        'https://tarekalsyed.github.io', // رابط موقعك
+        'http://localhost:3000',         // للاختبار المحلي
+        'http://127.0.0.1:5500'          // للاختبار المحلي
+    ],
+    credentials: true, // السماح بالتوكن
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // السماح بكل العمليات
+    allowedHeaders: ['Content-Type', 'Authorization'] // السماح بالهيدرز المهمة
 }));
 
-// 3. Body Parser
+// التعامل مع طلبات Preflight (OPTIONS) لضمان عدم حظر المتصفح
+app.options('*', cors());
+
+// 3. معالجة البيانات
 app.use(bodyParser.json({ limit: '50kb' })); 
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// 4. Database Connection
+// 4. الاتصال بقاعدة البيانات
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
@@ -66,7 +59,7 @@ const generalLimiter = rateLimit({
 });
 app.use('/api/', generalLimiter);
 
-// Initialize Database
+// تهيئة قاعدة البيانات
 async function initializeDatabase() {
     const client = await pool.connect();
     try {
@@ -84,7 +77,7 @@ async function initializeDatabase() {
     finally { client.release(); }
 }
 
-// Admin Middleware
+// Middleware للأدمن
 function authenticateAdmin(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -183,12 +176,14 @@ app.post('/api/login', async (req, res) => {
 
 // Quiz Results
 app.post('/api/quiz-results', async (req, res) => {
+    console.log('📝 محاولة حفظ نتيجة:', req.body); // LOG
     try { 
         await pool.query('INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5, $6)', 
             [req.body.studentId, req.body.quizName, req.body.subjectId, req.body.score, req.body.totalQuestions, req.body.correctAnswers]); 
+        console.log('✅ تم الحفظ بنجاح');
         res.json({ message: 'Saved' }); 
     } catch (e) { 
-        console.error('❌ Error saving result:', e.message); 
+        console.error('❌ خطأ في الحفظ:', e.message); // LOG ERROR
         res.status(500).json({ error: 'Error saving result' }); 
     }
 });
@@ -237,7 +232,7 @@ app.get('/api/quiz-status', async (req, res) => {
 
 // ================= Admin Routes =================
 
-// ✅ [NEW] Endpoint لجلب أحدث الأنشطة بسرعة (Fix Performance Issue)
+// ✅ Endpoint النشاطات السريع
 app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
     try {
         const query = `
@@ -347,7 +342,7 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
     } finally { client.release(); }
 });
 
-app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '15.2.0', compression: true }));
+app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '15.3.0', compression: true }));
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
