@@ -1,6 +1,6 @@
 {
   "name": "tawal_backend",
-  "version": "4.1.0",
+  "version": "4.2.0",
   "main": "server.js",
   "description": "Tawal Academy - Secure Backend API",
   "scripts": {
@@ -20,6 +20,7 @@
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "body-parser": "^1.20.2",
+    "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
