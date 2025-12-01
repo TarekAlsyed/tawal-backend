@@ -1,7 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 15.1.0 (PLATINUM EDITION: Optimized Activity Logs)
- * Updated to fix Dashboard Loading Issues
+ * SERVER.JS - Version 15.2.0 (Diamond Edition: Debugging & Fixes)
  * =================================================================================
  */
 
@@ -182,13 +181,18 @@ app.post('/api/login', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
-// Quiz Results
+// Quiz Results - 🔥 تم إضافة سجلات تشخيصية هنا 🔥
 app.post('/api/quiz-results', async (req, res) => {
+    console.log('📝 محاولة حفظ نتيجة:', req.body); // LOG
     try { 
         await pool.query('INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5, $6)', 
             [req.body.studentId, req.body.quizName, req.body.subjectId, req.body.score, req.body.totalQuestions, req.body.correctAnswers]); 
+        console.log('✅ تم الحفظ بنجاح');
         res.json({ message: 'Saved' }); 
-    } catch (e) { res.status(500).json({ error: 'Error' }); }
+    } catch (e) { 
+        console.error('❌ خطأ في الحفظ:', e.message); // LOG ERROR
+        res.status(500).json({ error: 'Error saving result' }); 
+    }
 });
 
 app.get('/api/students/:id', async (req, res) => { 
@@ -197,8 +201,21 @@ app.get('/api/students/:id', async (req, res) => {
 });
 
 app.get('/api/students/:id/results', async (req, res) => { 
-    try { const r = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1 ORDER BY completedAt DESC', [req.params.id]); res.json(r.rows); } 
-    catch (e) { res.status(500).json({ error: 'Error' }); } 
+    try { 
+        // 🔥 إصلاح casing (quizname بدل quizName)
+        const query = `
+            SELECT 
+                quizname as "quizName", 
+                score, 
+                subjectid as "subjectId",
+                completedat as "completedAt"
+            FROM quiz_results 
+            WHERE studentid = $1 
+            ORDER BY completedat DESC
+        `;
+        const r = await pool.query(query, [req.params.id]); 
+        res.json(r.rows); 
+    } catch (e) { res.status(500).json({ error: 'Error fetching results' }); } 
 });
 
 app.get('/api/students/:id/stats', async (req, res) => { 
@@ -223,25 +240,25 @@ app.get('/api/quiz-status', async (req, res) => {
 
 // ================= Admin Routes =================
 
-// ✅ [NEW] Endpoint لجلب أحدث الأنشطة بسرعة (Fix Performance Issue)
+// ✅ [Updated] Endpoint لجلب أحدث الأنشطة مع إصلاح أسماء الأعمدة (Fix Zero Data)
 app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
     try {
-        // نقوم بدمج (JOIN) جدول النتائج مع جدول الطلاب لجلب الاسم
+        // 🔥 نستخدم علامات التنصيص لضمان تطابق الأسماء مع الـ Frontend
         const query = `
             SELECT 
                 s.name as "studentName",
-                q.quizName,
+                q.quizname as "quizName",
                 q.score,
-                q.completedAt as "date"
+                q.completedat as "date"
             FROM quiz_results q
-            JOIN students s ON q.studentId = s.id
-            ORDER BY q.completedAt DESC
+            JOIN students s ON q.studentid = s.id
+            ORDER BY q.completedat DESC
             LIMIT 20
         `;
         const result = await pool.query(query);
         res.json(result.rows);
     } catch (e) {
-        console.error(e);
+        console.error('Activity Logs Error:', e);
         res.status(500).json({ error: 'Failed to fetch activity logs' });
     }
 });
@@ -334,7 +351,7 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
     } finally { client.release(); }
 });
 
-app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '15.1.0' }));
+app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '15.2.0', compression: true }));
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
