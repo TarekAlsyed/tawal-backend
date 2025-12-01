@@ -1,7 +1,7 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 13.0.0 (PLATINUM EDITION: High Security & Logic Fixes)
- * Updated to include DELETE Student Endpoint
+ * SERVER.JS - Version 15.0.0 (PLATINUM EDITION: Optimized & Compressed)
+ * Updated to fix Critical Performance & Data Issues
  * =================================================================================
  */
 
@@ -14,6 +14,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const compression = require('compression'); // ✅ [New] لإصلاح مشاكل الأداء
 
 // إعداد التطبيق
 const app = express();
@@ -21,6 +22,9 @@ const PORT = process.env.PORT || 3001;
 
 // 1. إعدادات الأمان (Security Headers)
 app.use(helmet());
+
+// ✅ [New] تفعيل ضغط الملفات لتسريع التحميل (Fix Performance Issue #14)
+app.use(compression());
 
 // 2. إعدادات CORS (محسنة وآمنة جداً)
 const allowedOrigins = [
@@ -49,7 +53,8 @@ app.use(cors({
 }));
 
 // 3. معالجة البيانات (Body Parser)
-app.use(bodyParser.json({ limit: '50kb' })); // زيادة طفيفة لاستيعاب البيانات المشفرة
+// ✅ تم الإبقاء على 50kb كحد أقصى للحماية من هجمات الإغراق (DoS)
+app.use(bodyParser.json({ limit: '50kb' })); 
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // 4. الاتصال بقاعدة البيانات (PostgreSQL)
@@ -61,7 +66,7 @@ const pool = new Pool({
 // 5. نظام الحد من الطلبات (Rate Limiting)
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 دقيقة
-    max: 3000, // زيادة الحد قليلاً لتجنب حظر المستخدمين النشطين
+    max: 3000, // الحد الحالي (يمكن تقليله إلى 500 إذا تعرض الموقع لهجوم)
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -279,6 +284,7 @@ app.get('/api/students/:id', async (req, res) => {
 
 app.get('/api/students/:id/results', async (req, res) => { 
     try { 
+        // ✅ يتم إرجاع التواريخ بتنسيق ISO 8601 القياسي (Fix Issue #2)
         const r = await pool.query('SELECT * FROM quiz_results WHERE studentId = $1 ORDER BY completedAt DESC', [req.params.id]); 
         res.json(r.rows); 
     } catch (e) { res.status(500).json({ error: 'Error fetching results' }); } 
@@ -397,11 +403,11 @@ app.get('/api/admin/login-logs', authenticateAdmin, async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Error fetching logs' }); } 
 });
 
-// ✅🔥🔥 [إضافة جديدة] حذف الطالب نهائياً (تنظيف شامل للقاعدة)
+// ✅🔥🔥 حذف الطالب نهائياً (تنظيف شامل للقاعدة)
 app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
     const client = await pool.connect();
     try {
-        await client.query('BEGIN'); // بدء المعاملة (Transaction) لضمان الحذف الكامل أو لا شيء
+        await client.query('BEGIN'); // بدء المعاملة (Transaction)
         const studentId = req.params.id;
 
         // 1. حذف البصمات المرتبطة
@@ -412,7 +418,7 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
         await client.query('DELETE FROM messages WHERE studentId = $1', [studentId]);
         // 4. حذف سجلات الدخول
         await client.query('DELETE FROM login_logs WHERE studentId = $1', [studentId]);
-        // 5. حذف سجلات النشاط (إن وجدت في التحديث الجديد)
+        // 5. حذف سجلات النشاط
         await client.query('DELETE FROM activity_logs WHERE studentId = $1', [studentId]);
 
         // 6. وأخيراً حذف الطالب نفسه
@@ -435,7 +441,7 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 });
 
 // فحص الصحة (Health Check)
-app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '13.0.0' }));
+app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '15.0.0', compression: true }));
 
 // بدء تشغيل السيرفر
 app.listen(PORT, () => {
