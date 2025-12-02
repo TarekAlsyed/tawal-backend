@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 18.0.0 (FULL NAVIGATION TRACKING)
+ * SERVER.JS - Version 19.0.0 (LOGOUT FEATURE ADDED)
  * =================================================================================
  */
 
@@ -290,7 +290,32 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// 🔥 Endpoint جديد لتسجيل أي نشاط (New Activity Logger)
+// 🔥🔥🔥 نقطة اتصال تسجيل الخروج الجديدة 🔥🔥🔥
+app.post('/api/logout', async (req, res) => {
+    const { studentId } = req.body;
+    if (!studentId) return res.status(400).json({ error: 'Missing studentId' });
+    
+    try {
+        // تحديث آخر سجل دخول لم يتم تسجيل خروجه بعد
+        await pool.query(`
+            UPDATE login_logs 
+            SET logoutTime = CURRENT_TIMESTAMP 
+            WHERE id = (
+                SELECT id FROM login_logs 
+                WHERE studentId = $1 
+                ORDER BY loginTime DESC 
+                LIMIT 1
+            )
+        `, [studentId]);
+        
+        res.json({ success: true, message: 'Logged out successfully' });
+    } catch (e) {
+        console.error('Logout Error:', e);
+        res.status(500).json({ error: 'Logout failed' });
+    }
+});
+
+// Endpoint new activity logger
 app.post('/api/log-activity', async (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
     if (!studentId || !activityType) return res.status(400).json({ error: 'Missing data' });
@@ -308,7 +333,7 @@ app.post('/api/log-activity', async (req, res) => {
     }
 });
 
-// 🔥 Quiz Results (حفظ النتيجة + تسجيل النشاط)
+// Quiz Results (حفظ النتيجة + تسجيل النشاط)
 app.post('/api/quiz-results', async (req, res) => {
     const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
     
@@ -479,7 +504,7 @@ app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
             FROM activity_logs al
             JOIN students s ON al.studentId = s.id
             ORDER BY al.timestamp DESC
-            LIMIT 30
+            LIMIT 20
         `;
         
         const result = await pool.query(query);
@@ -663,15 +688,16 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '18.0.0', 
+    version: '19.0.0', 
     compression: true,
     activityTracking: 'FULLY FIXED ✅',
+    logoutFeature: 'ENABLED ✅',
     timestamp: new Date().toISOString()
 }));
 
 // Start Server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 18.0.0 - Activity tracking is now FULLY functional!`);
+    console.log(`✅ Version 19.0.0 - Activity tracking & Logout fully functional!`);
     initializeDatabase();
 });
