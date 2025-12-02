@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 17.0.0 (ACTIVITY LOGGING FIX)
+ * SERVER.JS - Version 18.0.0 (FULL NAVIGATION TRACKING)
  * =================================================================================
  */
 
@@ -290,6 +290,24 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
+// 🔥 Endpoint جديد لتسجيل أي نشاط (New Activity Logger)
+app.post('/api/log-activity', async (req, res) => {
+    const { studentId, activityType, subjectName } = req.body;
+    if (!studentId || !activityType) return res.status(400).json({ error: 'Missing data' });
+
+    try {
+        await pool.query(`
+            INSERT INTO activity_logs (studentId, activityType, subjectName, timestamp) 
+            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+        `, [studentId, activityType, subjectName || '-']);
+        console.log(`📡 [Activity] Logged: ${activityType} for Student ${studentId}`);
+        res.json({ success: true });
+    } catch (e) {
+        console.error('❌ [Activity Error]', e);
+        res.status(500).json({ error: 'Failed' });
+    }
+});
+
 // 🔥 Quiz Results (حفظ النتيجة + تسجيل النشاط)
 app.post('/api/quiz-results', async (req, res) => {
     const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
@@ -454,14 +472,14 @@ app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
         const query = `
             SELECT 
                 s.name as "studentName",
-                al.subjectName as "quizName",
+                al.activityType,
+                al.subjectName,
                 al.score,
                 al.timestamp as "date"
             FROM activity_logs al
             JOIN students s ON al.studentId = s.id
-            WHERE al.activityType = 'quiz_completed'
             ORDER BY al.timestamp DESC
-            LIMIT 20
+            LIMIT 30
         `;
         
         const result = await pool.query(query);
@@ -645,7 +663,7 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '17.0.0', 
+    version: '18.0.0', 
     compression: true,
     activityTracking: 'FULLY FIXED ✅',
     timestamp: new Date().toISOString()
@@ -654,6 +672,6 @@ app.get('/api/health', (req, res) => res.json({
 // Start Server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 17.0.0 - Activity tracking is now FULLY functional!`);
+    console.log(`✅ Version 18.0.0 - Activity tracking is now FULLY functional!`);
     initializeDatabase();
 });
