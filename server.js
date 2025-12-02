@@ -1,6 +1,11 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 15.4.0 (Fixed Student Activity Tracking)
+ * SERVER.JS - Version 16.0.0 (ULTIMATE FIX: Activity Tracking)
+ * =================================================================================
+ * التحديثات:
+ * ✅ إصلاح تتبع النشاط (activity_logs) بشكل كامل
+ * ✅ إضافة endpoint جديد لجلب أنشطة الطالب
+ * ✅ تحسين عرض آخر الأنشطة للإدارة
  * =================================================================================
  */
 
@@ -58,17 +63,104 @@ async function initializeDatabase() {
     const client = await pool.connect();
     try {
         console.log('🔄 [DB] Checking tables & connection...');
-        await client.query(`CREATE TABLE IF NOT EXISTS students (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, isBlocked BOOLEAN DEFAULT FALSE)`);
-        await client.query(`CREATE TABLE IF NOT EXISTS quiz_results (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), quizName TEXT NOT NULL, subjectId TEXT, score INTEGER NOT NULL, totalQuestions INTEGER NOT NULL, correctAnswers INTEGER NOT NULL, completedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
-        await client.query(`CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), content TEXT NOT NULL, adminReply TEXT, isRead BOOLEAN DEFAULT FALSE, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
-        await client.query(`CREATE TABLE IF NOT EXISTS login_logs (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), loginTime TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, logoutTime TIMESTAMPTZ)`);
-        await client.query(`CREATE TABLE IF NOT EXISTS activity_logs (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), activityType TEXT NOT NULL, subjectName TEXT, timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
-        await client.query(`CREATE TABLE IF NOT EXISTS student_fingerprints (id SERIAL PRIMARY KEY, studentId INTEGER NOT NULL REFERENCES students(id), fingerprint TEXT NOT NULL, lastSeen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, UNIQUE(studentId, fingerprint))`);
-        await client.query(`CREATE TABLE IF NOT EXISTS blocked_fingerprints (id SERIAL PRIMARY KEY, fingerprint TEXT UNIQUE NOT NULL, reason TEXT, createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
-        await client.query(`CREATE TABLE IF NOT EXISTS quiz_status (id SERIAL PRIMARY KEY, subjectId TEXT UNIQUE NOT NULL, locked BOOLEAN DEFAULT FALSE, message TEXT, updatedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP)`);
+        
+        // Students table
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS students (
+                id SERIAL PRIMARY KEY, 
+                name TEXT NOT NULL, 
+                email TEXT UNIQUE, 
+                createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, 
+                isBlocked BOOLEAN DEFAULT FALSE
+            )
+        `);
+        
+        // Quiz results table
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS quiz_results (
+                id SERIAL PRIMARY KEY, 
+                studentId INTEGER NOT NULL REFERENCES students(id), 
+                quizName TEXT NOT NULL, 
+                subjectId TEXT, 
+                score INTEGER NOT NULL, 
+                totalQuestions INTEGER NOT NULL, 
+                correctAnswers INTEGER NOT NULL, 
+                completedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        // Messages table
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY, 
+                studentId INTEGER NOT NULL REFERENCES students(id), 
+                content TEXT NOT NULL, 
+                adminReply TEXT, 
+                isRead BOOLEAN DEFAULT FALSE, 
+                createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        // Login logs table
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS login_logs (
+                id SERIAL PRIMARY KEY, 
+                studentId INTEGER NOT NULL REFERENCES students(id), 
+                loginTime TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, 
+                logoutTime TIMESTAMPTZ
+            )
+        `);
+        
+        // 🔥 Activity logs table (مُحدَّث)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id SERIAL PRIMARY KEY, 
+                studentId INTEGER NOT NULL REFERENCES students(id), 
+                activityType TEXT NOT NULL, 
+                subjectName TEXT, 
+                score INTEGER,
+                timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        // Student fingerprints table
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS student_fingerprints (
+                id SERIAL PRIMARY KEY, 
+                studentId INTEGER NOT NULL REFERENCES students(id), 
+                fingerprint TEXT NOT NULL, 
+                lastSeen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, 
+                UNIQUE(studentId, fingerprint)
+            )
+        `);
+        
+        // Blocked fingerprints table
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS blocked_fingerprints (
+                id SERIAL PRIMARY KEY, 
+                fingerprint TEXT UNIQUE NOT NULL, 
+                reason TEXT, 
+                createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        // Quiz status table
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS quiz_status (
+                id SERIAL PRIMARY KEY, 
+                subjectId TEXT UNIQUE NOT NULL, 
+                locked BOOLEAN DEFAULT FALSE, 
+                message TEXT, 
+                updatedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
         console.log('✅ [DB] Database Ready & Secured.');
-    } catch (err) { console.error('❌ [DB] Critical Error:', err); } 
-    finally { client.release(); }
+    } catch (err) { 
+        console.error('❌ [DB] Critical Error:', err); 
+    } finally { 
+        client.release(); 
+    }
 }
 
 // Admin Authentication Middleware
@@ -107,21 +199,29 @@ app.post('/api/verify-fingerprint', async (req, res) => {
         const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
         if (blocked.rows.length > 0) return res.status(403).json({ ok: false, message: 'Device Blocked' });
         res.json({ ok: true });
-    } catch (e) { res.status(500).json({ ok: false }); }
+    } catch (e) { 
+        res.status(500).json({ ok: false }); 
+    }
 });
 
 // Student Registration
 app.post('/api/students/register', async (req, res) => {
     const { name, email, fingerprint } = req.body;
     if (!name || !email) return res.status(400).json({ error: 'Missing data' });
+    
     if (fingerprint) {
         const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
         if (blocked.rows.length > 0) return res.status(403).json({ error: 'Device Blocked' });
     }
+    
     try {
         const result = await pool.query('INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *', [name, email]);
         const newStudent = result.rows[0];
-        if (fingerprint) await pool.query('INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2)', [newStudent.id, fingerprint]);
+        
+        if (fingerprint) {
+            await pool.query('INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2)', [newStudent.id, fingerprint]);
+        }
+        
         res.json(newStudent);
     } catch (err) {
         if (err.code === '23505') {
@@ -137,12 +237,26 @@ app.post('/api/students/register', async (req, res) => {
 app.post('/api/messages', async (req, res) => {
     const { studentId, message } = req.body;
     if (!studentId || !message) return res.status(400).json({ error: 'Missing data' });
+    
     try {
-        const countQuery = await pool.query("SELECT COUNT(*) FROM messages WHERE studentId = $1 AND createdAt >= CURRENT_DATE", [studentId]);
-        if (parseInt(countQuery.rows[0].count) >= 3) return res.status(429).json({ error: 'Limit reached', remaining: 0 });
+        const countQuery = await pool.query(
+            "SELECT COUNT(*) FROM messages WHERE studentId = $1 AND createdAt >= CURRENT_DATE", 
+            [studentId]
+        );
+        
+        if (parseInt(countQuery.rows[0].count) >= 3) {
+            return res.status(429).json({ error: 'Limit reached', remaining: 0 });
+        }
+        
         await pool.query('INSERT INTO messages (studentId, content) VALUES ($1, $2)', [studentId, message]);
-        res.json({ message: 'Sent', remaining: 3 - (parseInt(countQuery.rows[0].count) + 1) });
-    } catch (e) { res.status(500).json({ error: 'Error' }); }
+        
+        res.json({ 
+            message: 'Sent', 
+            remaining: 3 - (parseInt(countQuery.rows[0].count) + 1) 
+        });
+    } catch (e) { 
+        res.status(500).json({ error: 'Error' }); 
+    }
 });
 
 app.get('/api/students/:id/messages', async (req, res) => {
@@ -151,45 +265,60 @@ app.get('/api/students/:id/messages', async (req, res) => {
         const now = new Date();
         const todayCount = r.rows.filter(m => new Date(m.createdat) >= new Date(now.setHours(0,0,0,0))).length;
         res.json({ messages: r.rows, remaining: Math.max(0, 3 - todayCount) });
-    } catch(e) { res.status(500).json([]); }
+    } catch(e) { 
+        res.status(500).json([]); 
+    }
 });
 
 // Login Tracking
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
+    
     try {
         if (fingerprint) {
             const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
             if (blocked.rows.length > 0) return res.status(403).json({ error: 'Device Blocked' });
-            await pool.query(`INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2) ON CONFLICT (studentId, fingerprint) DO UPDATE SET lastSeen=CURRENT_TIMESTAMP`, [studentId, fingerprint]);
+            
+            await pool.query(`
+                INSERT INTO student_fingerprints (studentId, fingerprint) 
+                VALUES ($1, $2) 
+                ON CONFLICT (studentId, fingerprint) 
+                DO UPDATE SET lastSeen=CURRENT_TIMESTAMP
+            `, [studentId, fingerprint]);
         }
+        
         await pool.query('INSERT INTO login_logs (studentId) VALUES ($1)', [studentId]);
+        
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Error' }); }
+    } catch (e) { 
+        res.status(500).json({ error: 'Error' }); 
+    }
 });
 
-// Quiz Results (WITH ACTIVITY LOGGING)
+// 🔥 Quiz Results (مع تسجيل النشاط - الإصلاح الرئيسي!)
 app.post('/api/quiz-results', async (req, res) => {
     const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
-    console.log('📝 Saving quiz result:', req.body);
+    
+    console.log('📝 [Quiz Result] Saving:', { studentId, quizName, score });
     
     try { 
-        // Save quiz result
-        await pool.query(
-            'INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5, $6)', 
-            [studentId, quizName, subjectId, score, totalQuestions, correctAnswers]
-        );
+        // 1. حفظ النتيجة
+        await pool.query(`
+            INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) 
+            VALUES ($1, $2, $3, $4, $5, $6)
+        `, [studentId, quizName, subjectId, score, totalQuestions, correctAnswers]);
         
-        // 🔥 LOG ACTIVITY (This was missing!)
-        await pool.query(
-            'INSERT INTO activity_logs (studentId, activityType, subjectName, timestamp) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)',
-            [studentId, 'quiz_completed', quizName]
-        );
+        // 2. 🔥 تسجيل النشاط (هذا كان مفقوداً!)
+        await pool.query(`
+            INSERT INTO activity_logs (studentId, activityType, subjectName, score, timestamp) 
+            VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+        `, [studentId, 'quiz_completed', quizName, score]);
         
-        console.log('✅ Quiz result & activity saved successfully');
+        console.log('✅ [Quiz Result] Saved successfully with activity log');
+        
         res.json({ message: 'Saved' }); 
     } catch (e) { 
-        console.error('❌ Error saving result:', e.message);
+        console.error('❌ [Quiz Result] Error:', e.message);
         res.status(500).json({ error: 'Error saving result' }); 
     }
 });
@@ -229,33 +358,71 @@ app.get('/api/students/:id/stats', async (req, res) => {
     try { 
         const r = await pool.query('SELECT score FROM quiz_results WHERE studentId = $1', [req.params.id]); 
         const rs = r.rows; 
-        if (!rs.length) return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0 }); 
+        
+        if (!rs.length) {
+            return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0 }); 
+        }
+        
         const avg = Math.round(rs.reduce((sum, row) => sum + row.score, 0) / rs.length);
         const best = Math.max(...rs.map(r => r.score));
-        res.json({ totalQuizzes: rs.length, averageScore: avg, bestScore: best }); 
+        
+        res.json({ 
+            totalQuizzes: rs.length, 
+            averageScore: avg, 
+            bestScore: best 
+        }); 
     } catch (e) { 
         res.status(500).json({ error: 'Error' }); 
     } 
 });
 
-// 🔥 FIX: Get Student Activity Logs (NEW ENDPOINT)
+// 🔥 Get Student Activity Logs (جديد ومُحدَّث!)
+app.get('/api/students/:id/activity', async (req, res) => {
+    try {
+        const query = `
+            SELECT 
+                activityType as "activityType",
+                subjectName as "subjectName",
+                score,
+                timestamp
+            FROM activity_logs
+            WHERE studentId = $1
+            ORDER BY timestamp DESC
+            LIMIT 50
+        `;
+        
+        const result = await pool.query(query, [req.params.id]);
+        
+        console.log(`✅ [Activity] Fetched ${result.rows.length} activities for student ${req.params.id}`);
+        
+        res.json(result.rows);
+    } catch (e) {
+        console.error('❌ [Activity] Error:', e);
+        res.status(500).json({ error: 'Error fetching activity' });
+    }
+});
+
+// 🔥 Get Student Login Logs (مُحدَّث)
 app.get('/api/students/:id/logs', async (req, res) => {
     try {
         const query = `
             SELECT 
-                ll.id,
-                ll.logintime as "loginTime",
-                ll.logouttime as "logoutTime"
-            FROM login_logs ll
-            WHERE ll.studentid = $1
-            ORDER BY ll.logintime DESC
+                id,
+                logintime as "loginTime",
+                logouttime as "logoutTime"
+            FROM login_logs
+            WHERE studentid = $1
+            ORDER BY logintime DESC
             LIMIT 50
         `;
+        
         const result = await pool.query(query, [req.params.id]);
-        console.log(`✅ Fetched ${result.rows.length} logs for student ${req.params.id}`);
+        
+        console.log(`✅ [Logs] Fetched ${result.rows.length} logs for student ${req.params.id}`);
+        
         res.json(result.rows);
     } catch (e) {
-        console.error('❌ Error fetching student logs:', e);
+        console.error('❌ [Logs] Error:', e);
         res.status(500).json({ error: 'Error fetching logs' });
     }
 });
@@ -274,24 +441,29 @@ app.get('/api/quiz-status', async (req, res) => {
 
 // ================= ADMIN ROUTES =================
 
-// Get Recent Activity (All Students)
+// 🔥 Get Recent Activity (All Students) - مُحدَّث!
 app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
     try {
         const query = `
             SELECT 
                 s.name as "studentName",
-                q.quizname as "quizName",
-                q.score,
-                q.completedat as "date"
-            FROM quiz_results q
-            JOIN students s ON q.studentid = s.id
-            ORDER BY q.completedat DESC
+                al.subjectName as "quizName",
+                al.score,
+                al.timestamp as "date"
+            FROM activity_logs al
+            JOIN students s ON al.studentId = s.id
+            WHERE al.activityType = 'quiz_completed'
+            ORDER BY al.timestamp DESC
             LIMIT 20
         `;
+        
         const result = await pool.query(query);
+        
+        console.log(`✅ [Admin Activity] Fetched ${result.rows.length} recent activities`);
+        
         res.json(result.rows);
     } catch (e) {
-        console.error('Activity Logs Error:', e);
+        console.error('❌ [Admin Activity] Error:', e);
         res.status(500).json({ error: 'Failed to fetch activity logs' });
     }
 });
@@ -335,6 +507,7 @@ app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
     try { 
         const s = await pool.query('SELECT COUNT(*) as t FROM students'); 
         const q = await pool.query('SELECT COUNT(*) as t, AVG(score) as a FROM quiz_results'); 
+        
         res.json({ 
             totalStudents: parseInt(s.rows[0].t), 
             totalQuizzes: parseInt(q.rows[0].t), 
@@ -368,8 +541,13 @@ app.post('/api/admin/students/:id/status', authenticateAdmin, async (req, res) =
 app.post('/api/admin/students/:id/block-fingerprint', authenticateAdmin, async (req, res) => { 
     try { 
         const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]); 
-        if (!fp.rows.length) return res.status(404).json({ error: 'No device found for this student' }); 
+        
+        if (!fp.rows.length) {
+            return res.status(404).json({ error: 'No device found for this student' }); 
+        }
+        
         await pool.query('INSERT INTO blocked_fingerprints (fingerprint, reason) VALUES ($1, $2) ON CONFLICT DO NOTHING', [fp.rows[0].fingerprint, 'Admin Block']); 
+        
         res.json({ message: 'Blocked' }); 
     } catch (e) { 
         res.status(500).json({ error: 'Error' }); 
@@ -379,8 +557,13 @@ app.post('/api/admin/students/:id/block-fingerprint', authenticateAdmin, async (
 app.post('/api/admin/students/:id/unblock-fingerprint', authenticateAdmin, async (req, res) => { 
     try { 
         const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]); 
-        if (!fp.rows.length) return res.status(404).json({ error: 'No device found' }); 
+        
+        if (!fp.rows.length) {
+            return res.status(404).json({ error: 'No device found' }); 
+        }
+        
         await pool.query('DELETE FROM blocked_fingerprints WHERE fingerprint = $1', [fp.rows[0].fingerprint]); 
+        
         res.json({ message: 'Unblocked' }); 
     } catch (e) { 
         res.status(500).json({ error: 'Error' }); 
@@ -396,6 +579,7 @@ app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res
             ON CONFLICT (subjectId) 
             DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP
         `, [req.params.subjectId, req.body.locked, req.body.message]); 
+        
         res.json({ message: 'Updated' }); 
     } catch (e) { 
         res.status(500).json({ error: 'Error' }); 
@@ -454,14 +638,15 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '15.4.0', 
+    version: '16.0.0', 
     compression: true,
-    activityTracking: 'FIXED ✅'
+    activityTracking: 'FULLY FIXED ✅',
+    timestamp: new Date().toISOString()
 }));
 
 // Start Server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Activity tracking is now fully functional!`);
+    console.log(`✅ Version 16.0.0 - Activity tracking is now FULLY functional!`);
     initializeDatabase();
 });
