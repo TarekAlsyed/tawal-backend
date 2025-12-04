@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 19.0.0 (LOGOUT FEATURE ADDED)
+ * SERVER.JS - Version 20.0.0 (Added Public Stats Endpoint for Real Data)
  * =================================================================================
  */
 
@@ -172,6 +172,25 @@ function authenticateAdmin(req, res, next) {
 }
 
 // ================= API ENDPOINTS =================
+
+// 🔥🔥🔥 NEW ENDPOINT: Public Stats (For Homepage) 🔥🔥🔥
+// هذا هو الكود الجديد الذي يسمح للصفحة الرئيسية بجلب الأرقام الحقيقية
+app.get('/api/public-stats', async (req, res) => {
+    try {
+        const s = await pool.query('SELECT COUNT(*) as t FROM students');
+        const q = await pool.query('SELECT COUNT(*) as t FROM quiz_results');
+        
+        res.json({
+            totalStudents: parseInt(s.rows[0].t),
+            totalQuizzes: parseInt(q.rows[0].t)
+        });
+    } catch (e) {
+        // في حالة الخطأ نعيد أصفار
+        console.error('Stats Error:', e);
+        res.json({ totalStudents: 0, totalQuizzes: 0 });
+    }
+});
+// 🔥🔥🔥 END NEW ENDPOINT 🔥🔥🔥
 
 // Admin Login
 app.post('/api/admin/login', async (req, res) => {
@@ -688,9 +707,10 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '19.0.0', 
+    version: '20.0.0', 
     compression: true,
     activityTracking: 'FULLY FIXED ✅',
+    publicStats: 'ENABLED ✅',
     logoutFeature: 'ENABLED ✅',
     timestamp: new Date().toISOString()
 }));
@@ -698,6 +718,6 @@ app.get('/api/health', (req, res) => res.json({
 // Start Server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 19.0.0 - Activity tracking & Logout fully functional!`);
+    console.log(`✅ Version 20.0.0 - Activity tracking & Public Stats fully functional!`);
     initializeDatabase();
 });
