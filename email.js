@@ -2,6 +2,8 @@
  * =================================================================================
  * EMAIL.JS - Version 25.0.2 (FINAL FIX - 100% Working)
  * =================================================================================
+ * 🔥 تم تطبيق الإصلاحات الحرجة للمشاكل التالية:
+ * 1. مشكلة OTP لا يصل أبداً - تم إضافة Fallback Dev Mode لإرجاع الرمز عبر الـ console إذا فشل الإرسال أو لم تتوفر مفاتيح SendGrid في بيئة التطوير.
  */
 
 require('dotenv').config();
@@ -11,19 +13,35 @@ const sgMail = require('@sendgrid/mail');
 if (!process.env.SENDGRID_API_KEY) {
     console.error('❌ [SendGrid] MISSING: SENDGRID_API_KEY in environment variables!');
     console.error('   Add it in Railway Dashboard → Variables');
-    process.exit(1);
+    // ⚠️ لا نوقف العملية هنا لكي نسمح بـ Dev Mode Fallback، إلا إذا كنا في الإنتاج
+    if (process.env.NODE_ENV === 'production') {
+        process.exit(1);
+    }
 }
 
 if (!process.env.SENDGRID_VERIFIED_EMAIL) {
     console.error('❌ [SendGrid] MISSING: SENDGRID_VERIFIED_EMAIL in environment variables!');
     console.error('   Add it in Railway Dashboard → Variables');
-    process.exit(1);
+    // ⚠️ لا نوقف العملية هنا لكي نسمح بـ Dev Mode Fallback
+    if (process.env.NODE_ENV === 'production') {
+        process.exit(1);
+    }
 }
 
-// ضبط API Key
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+// ضبط API Key (إذا كان موجوداً)
+if (process.env.SENDGRID_API_KEY) {
+    sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+}
+
 
 const sendOTP = async (toEmail, otpCode) => {
+    // 🔥 التعديل 1: إضافة منطق Dev Mode Fallback في حالة عدم وجود المفاتيح
+    // إذا كنا في Dev Mode ولا يوجد SendGrid API Key، نعتبره نجاحاً ونرجع الرمز للكونسول
+    if (process.env.NODE_ENV === 'development' && !process.env.SENDGRID_API_KEY) {
+        console.log('🔐 [DEV MODE] OTP for', toEmail, ':', otpCode);
+        return { success: true, method: 'console', otp: otpCode };
+    }
+
     console.log(`📧 [SendGrid] Preparing email for ${toEmail}...`);
     console.log(`   OTP Code: ${otpCode}`);
     console.log(`   From: ${process.env.SENDGRID_VERIFIED_EMAIL}`);
@@ -48,7 +66,6 @@ const sendOTP = async (toEmail, otpCode) => {
                         <td align="center" style="padding: 40px 20px;">
                             <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width: 600px; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
                                 
-                                <!-- Header -->
                                 <tr>
                                     <td style="padding: 30px 40px; text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px 12px 0 0;">
                                         <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 700;">
@@ -57,7 +74,6 @@ const sendOTP = async (toEmail, otpCode) => {
                                     </td>
                                 </tr>
 
-                                <!-- Body -->
                                 <tr>
                                     <td style="padding: 40px;">
                                         <h2 style="margin: 0 0 20px 0; color: #2c3e50; font-size: 24px; text-align: center;">
@@ -68,7 +84,6 @@ const sendOTP = async (toEmail, otpCode) => {
                                             لإكمال عملية التسجيل، يرجى استخدام رمز التحقق التالي:
                                         </p>
 
-                                        <!-- OTP Box -->
                                         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
                                             <tr>
                                                 <td align="center" style="padding: 20px 0;">
@@ -87,7 +102,6 @@ const sendOTP = async (toEmail, otpCode) => {
                                     </td>
                                 </tr>
 
-                                <!-- Footer -->
                                 <tr>
                                     <td style="padding: 30px 40px; background-color: #f8f9fa; border-radius: 0 0 12px 12px; text-align: center;">
                                         <p style="margin: 0 0 10px 0; color: #999999; font-size: 12px;">
@@ -126,7 +140,7 @@ const sendOTP = async (toEmail, otpCode) => {
         console.log(`   Status: ${result[0].statusCode}`);
         console.log(`   Message ID: ${result[0].headers['x-message-id']}`);
         
-        return true;
+        return { success: true, method: 'email' }; // تغيير قيمة الإرجاع ليتوافق مع server.js
         
     } catch (error) {
         console.error('❌ [SendGrid] Failed to send email!');
@@ -150,7 +164,12 @@ const sendOTP = async (toEmail, otpCode) => {
             }
         }
         
-        return false;
+        // 🔥 التعديل 2: إضافة Fallback هنا أيضاً إذا فشل الإرسال ونحن في Dev Mode
+        if (process.env.NODE_ENV === 'development') {
+            return { success: true, method: 'console', otp: otpCode }; // إرجاع الرمز كنجاح في Dev Mode
+        }
+        
+        return { success: false }; // تغيير قيمة الإرجاع ليتوافق مع server.js
     }
 };
 
