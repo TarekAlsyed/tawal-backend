@@ -139,27 +139,51 @@ app.post('/api/admin/upload', authenticateAdmin, upload.single('file'), async (r
     }
 });
 
-// REQUEST OTP
+// REQUEST OTP - مع Fallback Mechanism
 app.post('/api/auth/send-otp', validateRequest(schemas.otpRequest), async (req, res) => {
     const { email } = req.body;
 
     try {
         const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // حفظ OTP في Redis (10 دقائق)
         await redisClient.setEx(`otp:${email}`, 600, otpCode);
         
-        console.log(`📧 Attempting to send OTP to ${email}...`); 
+        console.log(`📧 Attempting to send OTP to ${email}...`);
+        
+        // 🔥 محاولة إرسال الإيميل
         const sent = await sendOTP(email, otpCode);
 
         if (sent) {
             console.log(`✅ OTP sent successfully to ${email}`);
-            res.json({ message: 'OTP sent successfully', email });
+            res.json({ 
+                message: 'OTP sent successfully', 
+                email,
+                method: 'email' // طريقة الإرسال
+            });
         } else {
-            console.error(`❌ Failed to send OTP email to ${email}`);
-            res.status(500).json({ error: 'Failed to send email' });
+            // 🔥 Fallback: إظهار OTP في Console (للتطوير فقط!)
+            if (process.env.NODE_ENV === 'development') {
+                console.log(`⚠️ [FALLBACK] Email failed. OTP for ${email}: ${otpCode}`);
+                res.json({ 
+                    message: 'Email service unavailable. Check server logs for OTP.', 
+                    email,
+                    method: 'console',
+                    // ⚠️ احذف هذا السطر في Production!
+                    otp: otpCode // فقط للتطوير
+                });
+            } else {
+                // في Production: لا نكشف الـ OTP
+                console.error(`❌ Failed to send OTP email to ${email}`);
+                res.status(500).json({ 
+                    error: 'Failed to send verification code. Please try again later or contact support.',
+                    email
+                });
+            }
         }
     } catch (e) {
-        console.error('OTP Error:', e);
-        res.status(500).json({ error: 'Server error' });
+        console.error('❌ [OTP Endpoint Error]', e);
+        res.status(500).json({ error: 'Server error while processing OTP request' });
     }
 });
 
@@ -529,3 +553,12 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`✅ Version 24.0.5 - Secure Admin Mode & Proxy Trust Active!`);
 });
+
+/*
+ * =================================================================================
+ * 📝 إضافة متغير بيئة جديد في Railway:
+ * =================================================================================
+ * * NODE_ENV=development  (للتطوير - يعرض OTP في Console)
+ * NODE_ENV=production   (للإنتاج - لا يعرض OTP)
+ * * =================================================================================
+ */
