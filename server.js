@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 24.0.0 (FINAL: Full Backend + Static Files + Cloud Uploads)
+ * SERVER.JS - Version 24.0.1 (FIXED: Railway Proxy Trust Enabled)
  * =================================================================================
  */
 
@@ -15,18 +15,22 @@ const jwt = require('jsonwebtoken');
 const compression = require('compression'); 
 const hpp = require('hpp'); 
 const xss = require('xss'); 
-const path = require('path'); // 🔥 To handle file paths
+const path = require('path'); 
 const { pool, initializeDatabase } = require('./database'); 
 const { validateRequest, schemas } = require('./validation'); 
 const redisClient = require('./cache'); 
 const { sendOTP } = require('./email');
-const { upload, uploadToCloudinary } = require('./upload'); // 🔥 Upload Service (NEW)
+const { upload, uploadToCloudinary } = require('./upload'); 
 
 const app = express();
+
+// 🔥🔥🔥 الإصلاح الجذري لمشكلة Railway & Rate Limit 🔥🔥🔥
+// هذا السطر يخبر Express بأن يثق في الترويسات القادمة من Railway Proxy
+app.set('trust proxy', 1); 
+
 const PORT = process.env.PORT || 3001;
 
 // Security & Middleware
-// تعديل Helmet للسماح بتحميل الصور من مصادر مختلفة (Cloudinary + Local)
 app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" } 
 }));
@@ -47,8 +51,7 @@ app.options('*', cors());
 app.use(bodyParser.json({ limit: '50kb' })); 
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// 🔥 SERVE STATIC FILES (الملفات القديمة) 🔥
-// هذا يسمح بقراءة الصور وملفات PDF الموجودة في مجلدات المشروع الحالية
+// 🔥 SERVE STATIC FILES
 app.use('/static/images', express.static(path.join(__dirname, 'images')));
 app.use('/static/pdf', express.static(path.join(__dirname, 'pdf')));
 
@@ -73,18 +76,23 @@ const generalLimiter = rateLimit({
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
+    // التأكيد على تخطي التحقق المزعج إذا استمرت المشكلة (إجراء احترازي)
+    validate: { xForwardedForHeader: false }
 });
+
 const loginLimiter = rateLimit({
     windowMs: 60 * 60 * 1000, 
     max: 20, 
-    message: { error: 'Too many login attempts, please try again later.' }
+    message: { error: 'Too many login attempts, please try again later.' },
+    validate: { xForwardedForHeader: false }
 });
 
 // OTP Limiter
 const otpLimiter = rateLimit({
     windowMs: 60 * 60 * 1000, 
-    max: 5, 
-    message: { error: 'Too many OTP requests, please wait an hour.' }
+    max: 10, // تم الرفع قليلاً للتجربة
+    message: { error: 'Too many OTP requests, please wait an hour.' },
+    validate: { xForwardedForHeader: false }
 });
 
 app.use('/api/', generalLimiter);
@@ -109,8 +117,7 @@ function authenticateAdmin(req, res, next) {
 
 // ================= API ENDPOINTS =================
 
-// 🔥 ADMIN UPLOAD ENDPOINT (NEW)
-// يرفع الملف إلى Cloudinary ويرجع الرابط
+// Admin Upload
 app.post('/api/admin/upload', authenticateAdmin, upload.single('file'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No file uploaded' });
@@ -135,11 +142,15 @@ app.post('/api/auth/send-otp', validateRequest(schemas.otpRequest), async (req, 
     try {
         const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
         await redisClient.setEx(`otp:${email}`, 600, otpCode);
+        
+        console.log(`📧 Attempting to send OTP to ${email}...`); // Log للتتبع
         const sent = await sendOTP(email, otpCode);
 
         if (sent) {
+            console.log(`✅ OTP sent successfully to ${email}`);
             res.json({ message: 'OTP sent successfully', email });
         } else {
+            console.error(`❌ Failed to send OTP email to ${email}`);
             res.status(500).json({ error: 'Failed to send email' });
         }
     } catch (e) {
@@ -221,8 +232,8 @@ app.post('/api/students/register', validateRequest(schemas.studentRegister), asy
     try {
         const cachedOtp = await redisClient.get(`otp:${email}`);
         
-        if (!cachedOtp) return res.status(400).json({ error: 'OTP expired or not found.' });
-        if (cachedOtp !== otp) return res.status(400).json({ error: 'Invalid OTP code.' });
+        if (!cachedOtp) return res.status(400).json({ error: 'رمز التحقق منتهي الصلاحية أو غير موجود.' });
+        if (cachedOtp !== otp) return res.status(400).json({ error: 'رمز التحقق خاطئ.' });
 
         await redisClient.del(`otp:${email}`);
 
@@ -498,8 +509,8 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '24.0.0', 
-    security: 'FULL ARMORED (DB Split + HPP + XSS + Joi) ✅',
+    version: '24.0.1', 
+    security: 'FULL ARMORED (DB Split + HPP + XSS + Joi + TrustedProxy) ✅',
     performance: 'REDIS CACHING ENABLED 🚀',
     auth: 'EMAIL OTP ENABLED 🔐',
     uploads: 'CLOUDINARY + LOCAL 📂',
@@ -508,5 +519,5 @@ app.get('/api/health', (req, res) => res.json({
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 24.0.0 - Full Features Enabled!`);
+    console.log(`✅ Version 24.0.1 - Railway Proxy Support Added!`);
 });
