@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 25.0.0 (FINAL STABLE with SendGrid)
+ * SERVER.JS - Version 25.1.0 (UPDATED with Enhanced OTP & Register Logs)
  * =================================================================================
  */
 
@@ -19,7 +19,7 @@ const path = require('path');
 const { pool, initializeDatabase } = require('./database'); 
 const { validateRequest, schemas } = require('./validation'); 
 const redisClient = require('./cache'); 
-const { sendOTP } = require('./email'); // سيستدعي ملف SendGrid الجديد تلقائياً
+const { sendOTP } = require('./email'); 
 const { upload, uploadToCloudinary } = require('./upload'); 
 
 const app = express();
@@ -29,7 +29,8 @@ app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 3001;
 
-// Security & Middleware
+// ================= SECURITY & MIDDLEWARE =================
+
 app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" } 
 }));
@@ -68,7 +69,8 @@ app.use((req, res, next) => {
     next();
 });
 
-// Rate Limiting
+// ================= RATE LIMITING =================
+
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 1000, 
@@ -98,7 +100,8 @@ app.use('/api/auth/send-otp', otpLimiter);
 
 initializeDatabase();
 
-// Admin Middleware
+// ================= ADMIN AUTHENTICATION =================
+
 function authenticateAdmin(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -113,75 +116,137 @@ function authenticateAdmin(req, res, next) {
 
 // ================= API ENDPOINTS =================
 
-// Request OTP
+// 1. Request OTP (Updated Logic)
 app.post('/api/auth/send-otp', validateRequest(schemas.otpRequest), async (req, res) => {
     const { email } = req.body;
 
     try {
-        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        // ضمان 6 أرقام دائماً (حتى لو بدأ بصفر)
+        const otpCode = String(Math.floor(100000 + Math.random() * 900000));
         
-        // حفظ OTP في Redis (10 دقائق)
+        console.log(`🔐 [OTP] Generated for ${email}: ${otpCode}`);
+        
+        // حفظ OTP في Redis (10 دقائق = 600 ثانية)
         await redisClient.setEx(`otp:${email}`, 600, otpCode);
+        console.log(`💾 [Redis] OTP saved for ${email} (expires in 10 min)`);
         
-        // إرسال الكود (عبر SendGrid)
+        // إرسال الكود عبر SendGrid
         const sent = await sendOTP(email, otpCode);
 
         if (sent) {
-            res.json({ message: 'OTP sent successfully', email, method: 'email' });
+            res.json({ 
+                message: 'OTP sent successfully', 
+                email, 
+                method: 'email' 
+            });
         } else {
-            // Fallback للمطورين فقط
+            // Fallback: في Dev Mode فقط، اعرض OTP في الرد
             if (process.env.NODE_ENV === 'development') {
-                console.log(`⚠️ [DEV MODE] Email Failed. OTP for ${email} is: ${otpCode}`);
-                res.json({ message: 'Dev Mode: Email failed, check logs.', email, method: 'console', otp: otpCode });
+                console.log(`⚠️ [DEV MODE] Email failed but OTP is: ${otpCode}`);
+                res.json({ 
+                    message: 'Dev Mode: Email failed, check console logs', 
+                    email, 
+                    method: 'console', 
+                    otp: otpCode // للتطوير فقط
+                });
             } else {
-                res.status(500).json({ error: 'Failed to send verification code.' });
+                // في Production: خطأ حقيقي
+                res.status(500).json({ 
+                    error: 'فشل إرسال رمز التحقق. يرجى المحاولة لاحقاً.' 
+                });
             }
         }
     } catch (e) {
-        console.error('OTP Error:', e);
-        res.status(500).json({ error: 'Server error' });
+        console.error('❌ [OTP Error]:', e);
+        res.status(500).json({ error: 'خطأ في السيرفر' });
     }
 });
 
-// Student Registration
+// 2. Student Registration (Updated Logic)
 app.post('/api/students/register', validateRequest(schemas.studentRegister), async (req, res) => {
     const { name, email, fingerprint, otp } = req.body;
 
     try {
+        // 1. جلب OTP المحفوظ من Redis
         const cachedOtp = await redisClient.get(`otp:${email}`);
         
-        if (!cachedOtp) return res.status(400).json({ error: 'رمز التحقق منتهي الصلاحية أو غير موجود.' });
-        if (cachedOtp !== otp) return res.status(400).json({ error: 'رمز التحقق خاطئ.' });
+        if (!cachedOtp) {
+            console.warn(`⚠️ [OTP] Expired or not found for ${email}`);
+            return res.status(400).json({ 
+                error: 'رمز التحقق منتهي الصلاحية أو غير موجود. اطلب رمزاً جديداً.' 
+            });
+        }
+        
+        // 2. التحقق من صحة OTP
+        if (cachedOtp !== otp) {
+            console.warn(`⚠️ [OTP] Incorrect code for ${email}`);
+            console.warn(`   Expected: ${cachedOtp}, Got: ${otp}`);
+            return res.status(400).json({ 
+                error: 'رمز التحقق خاطئ. تأكد من الأرقام وحاول مجدداً.' 
+            });
+        }
 
+        console.log(`✅ [OTP] Verified successfully for ${email}`);
+        
+        // 3. حذف OTP بعد الاستخدام (One-Time Use)
         await redisClient.del(`otp:${email}`);
 
+        // 4. فحص البصمة للحظر
         if (fingerprint) {
-            const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
-            if (blocked.rows.length > 0) return res.status(403).json({ error: 'Device Blocked' });
+            const blocked = await pool.query(
+                'SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', 
+                [fingerprint]
+            );
+            if (blocked.rows.length > 0) {
+                console.warn(`⚠️ [Security] Blocked fingerprint attempted: ${fingerprint}`);
+                return res.status(403).json({ error: 'Device Blocked' });
+            }
         }
         
-        const result = await pool.query('INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *', [name, email]);
+        // 5. إنشاء حساب الطالب
+        const result = await pool.query(
+            'INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *', 
+            [name, email]
+        );
         const newStudent = result.rows[0];
         
+        // 6. تحديث الكاش
         await redisClient.del('public_stats');
 
+        // 7. حفظ البصمة
         if (fingerprint) {
-            await pool.query('INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2)', [newStudent.id, fingerprint]);
+            await pool.query(
+                'INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2)', 
+                [newStudent.id, fingerprint]
+            );
         }
         
+        console.log(`✅ [Register] New student created: ${newStudent.name} (ID: ${newStudent.id})`);
         res.json(newStudent);
+        
     } catch (err) {
+        // معالجة خطأ الإيميل المكرر
         if (err.code === '23505') {
-            const existing = await pool.query('SELECT * FROM students WHERE email = $1', [email]);
-            if (existing.rows[0].isblocked) return res.status(403).json({ error: 'Account Blocked' });
+            console.log(`⚠️ [Register] Duplicate email: ${email}`);
+            const existing = await pool.query(
+                'SELECT * FROM students WHERE email = $1', 
+                [email]
+            );
+            
+            if (existing.rows[0].isblocked) {
+                return res.status(403).json({ error: 'Account Blocked' });
+            }
+            
+            // إرجاع الحساب الموجود
             return res.json(existing.rows[0]);
         }
-        console.error('Register Error:', err);
-        res.status(500).json({ error: 'Error during registration' });
+        
+        console.error('❌ [Register Error]:', err);
+        res.status(500).json({ error: 'خطأ أثناء التسجيل' });
     }
 });
 
-// Admin Login
+// 3. Admin Login
 app.post('/api/admin/login', validateRequest(schemas.adminLogin), async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Required fields missing' });
@@ -204,7 +269,7 @@ app.post('/api/admin/login', validateRequest(schemas.adminLogin), async (req, re
     }
 });
 
-// Other Endpoints (Shortened for brevity as they are unchanged logic)
+// 4. Public Stats
 app.get('/api/public-stats', async (req, res) => {
     try {
         const cached = await redisClient.get('public_stats');
@@ -217,6 +282,7 @@ app.get('/api/public-stats', async (req, res) => {
     } catch (e) { res.json({ totalStudents: 0, totalQuizzes: 0 }); }
 });
 
+// 5. Student Login (Session Log)
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
     try {
@@ -230,6 +296,7 @@ app.post('/api/login', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Error' }); }
 });
 
+// 6. Logout
 app.post('/api/logout', async (req, res) => {
     const { studentId } = req.body;
     try {
@@ -238,6 +305,7 @@ app.post('/api/logout', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Logout failed' }); }
 });
 
+// 7. Activity Log
 app.post('/api/log-activity', validateRequest(schemas.activityLog), async (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
     try {
@@ -246,6 +314,7 @@ app.post('/api/log-activity', validateRequest(schemas.activityLog), async (req, 
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
+// 8. Quiz Results
 app.post('/api/quiz-results', validateRequest(schemas.quizResult), async (req, res) => {
     const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
     try { 
@@ -256,15 +325,23 @@ app.post('/api/quiz-results', validateRequest(schemas.quizResult), async (req, r
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
+// 9. Student Data Getters
 app.get('/api/students/:id', async (req, res) => { try { const r = await pool.query('SELECT * FROM students WHERE id = $1', [req.params.id]); res.json(r.rows[0] || {}); } catch(e) { res.status(500).json({}); } });
 app.get('/api/students/:id/results', async (req, res) => { try { const r = await pool.query('SELECT quizname as "quizName", score, subjectid as "subjectId", completedat as "completedAt" FROM quiz_results WHERE studentid = $1 ORDER BY completedat DESC', [req.params.id]); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 app.get('/api/students/:id/stats', async (req, res) => { try { const r = await pool.query('SELECT score FROM quiz_results WHERE studentId = $1', [req.params.id]); const rs = r.rows; if (!rs.length) return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0 }); const avg = Math.round(rs.reduce((s, row) => s + row.score, 0) / rs.length); const best = Math.max(...rs.map(r => r.score)); res.json({ totalQuizzes: rs.length, averageScore: avg, bestScore: best }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
+
+// 10. Messaging System
 app.get('/api/students/:id/messages', async (req, res) => { try { const r = await pool.query('SELECT * FROM messages WHERE studentId = $1 ORDER BY createdAt DESC', [req.params.id]); const now = new Date(); const todayCount = r.rows.filter(m => new Date(m.createdat) >= new Date(now.setHours(0,0,0,0))).length; res.json({ messages: r.rows, remaining: Math.max(0, 3 - todayCount) }); } catch(e) { res.status(500).json([]); } });
 app.post('/api/messages', validateRequest(schemas.message), async (req, res) => { const { studentId, message } = req.body; try { const countQuery = await pool.query("SELECT COUNT(*) FROM messages WHERE studentId = $1 AND createdAt >= CURRENT_DATE", [studentId]); if (parseInt(countQuery.rows[0].count) >= 3) return res.status(429).json({ error: 'Limit reached', remaining: 0 }); await pool.query('INSERT INTO messages (studentId, content) VALUES ($1, $2)', [studentId, message]); res.json({ message: 'Sent', remaining: 3 - (parseInt(countQuery.rows[0].count) + 1) }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
+
+// 11. Quiz Status Check
 app.get('/api/quiz-status', async (req, res) => { try { const cached = await redisClient.get('quiz_status'); if (cached) return res.json(JSON.parse(cached)); const r = await pool.query('SELECT * FROM quiz_status'); const map = {}; r.rows.forEach(row => map[row.subjectid] = { locked: row.locked, message: row.message }); await redisClient.setEx('quiz_status', 60, JSON.stringify(map)); res.json(map); } catch (e) { res.json({}); } });
+
+// 12. File Upload (Admin Only)
 app.post('/api/admin/upload', authenticateAdmin, upload.single('file'), async (req, res) => { if (!req.file) return res.status(400).json({ error: 'No file' }); try { const result = await uploadToCloudinary(req.file.buffer); res.json({ message: 'Uploaded', url: result.secure_url }); } catch (e) { res.status(500).json({ error: 'Upload failed' }); } });
 
-// Admin Stats & Management
+// ================= ADMIN MANAGEMENT =================
+
 app.get('/api/admin/stats', authenticateAdmin, async (req, res) => { try { const s = await pool.query('SELECT COUNT(*) as t FROM students'); const q = await pool.query('SELECT COUNT(*) as t, AVG(score) as a FROM quiz_results'); res.json({ totalStudents: parseInt(s.rows[0].t), totalQuizzes: parseInt(q.rows[0].t), averageScore: Math.round(q.rows[0].a || 0) }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 app.get('/api/admin/students', authenticateAdmin, async (req, res) => { try { const r = await pool.query('SELECT * FROM students ORDER BY createdAt DESC'); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 app.post('/api/admin/students/:id/status', authenticateAdmin, async (req, res) => { try { await pool.query('UPDATE students SET isblocked = $1 WHERE id = $2', [req.body.isblocked, req.params.id]); res.json({ message: 'Updated' }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
@@ -275,9 +352,11 @@ app.get('/api/admin/messages', authenticateAdmin, async (req, res) => { try { co
 app.post('/api/admin/messages/:id/reply', authenticateAdmin, async (req, res) => { try { await pool.query('UPDATE messages SET adminReply = $1 WHERE id = $2', [req.body.reply, req.params.id]); res.json({ message: 'Replied' }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => { const client = await pool.connect(); try { await client.query('BEGIN'); const studentId = req.params.id; await client.query('DELETE FROM student_fingerprints WHERE studentId = $1', [studentId]); await client.query('DELETE FROM quiz_results WHERE studentId = $1', [studentId]); await client.query('DELETE FROM messages WHERE studentId = $1', [studentId]); await client.query('DELETE FROM login_logs WHERE studentId = $1', [studentId]); await client.query('DELETE FROM activity_logs WHERE studentId = $1', [studentId]); await client.query('DELETE FROM active_sessions WHERE studentId = $1', [studentId]); const result = await client.query('DELETE FROM students WHERE id = $1 RETURNING *', [studentId]); if (result.rowCount === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Student not found' }); } await redisClient.del('public_stats'); await client.query('COMMIT'); res.json({ message: 'Deleted' }); } catch (e) { await client.query('ROLLBACK'); res.status(500).json({ error: 'Error' }); } finally { client.release(); } });
 
-app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '25.0.0 (SendGrid)', timestamp: new Date().toISOString() }));
+// ================= HEALTH & START =================
+
+app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '25.1.0', timestamp: new Date().toISOString() }));
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 25.0.0 - SendGrid Enabled`);
+    console.log(`✅ Version 25.1.0 - SendGrid Logic Updated`);
 });
