@@ -23,7 +23,7 @@ const cors = require('cors');
 const path = require('path');
 // ✅ تحديث لاستخدام دوال الـ safe cache بدلاً من العميل المباشر
 const cache = require('./cache'); 
-const { sendEmail } = require('./sendgrid'); // دالة إرسال الإيميل
+const { sendEmail } = require('./email'); // دالة إرسال الإيميل
 const app = express();
 const pool = new Pool({ connectionString: DB_URL });
 
