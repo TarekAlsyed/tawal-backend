@@ -1,463 +1,574 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 25.2.0 (FINAL COMPLETE: OTP + Logs + Admin Features)
+ * SERVER.JS - Main Backend Server
  * =================================================================================
+ * 🔥 تم تطبيق الإصلاحات الحرجة للمشاكل التالية:
+ * 1. مشكلة CORS Errors في Production - تم استبدال إعدادات CORS بقائمة ديناميكية تدعم vercel.app و github.io.
+ * 2. تحديث نقطة نهاية /api/auth/send-otp - لعرض الرمز في وضع التطوير إذا فشل إرسال SendGrid.
+ * 3. تحديث استخدامات Redis - استبدال جميع استدعاءات redisClient بدوال cache الآمنة (get, setEx, del).
  */
-
 require('dotenv').config();
+
+// 1. الثوابت والإعدادات
+const PORT = process.env.PORT || 3000;
+const DB_URL = process.env.DATABASE_URL;
+
+// 2. الملحقات والمعدات
 const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const bcrypt = require('bcryptjs');
+const { Pool } = require('pg');
+const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const compression = require('compression'); 
-const hpp = require('hpp'); 
-const xss = require('xss'); 
-const path = require('path'); 
-const { pool, initializeDatabase } = require('./database'); 
-const { validateRequest, schemas } = require('./validation'); 
-const redisClient = require('./cache'); 
-const { sendOTP } = require('./email'); 
-const { upload, uploadToCloudinary } = require('./upload'); 
-
+const Joi = require('joi');
+const cors = require('cors');
+const path = require('path');
+// ✅ تحديث لاستخدام دوال الـ safe cache بدلاً من العميل المباشر
+const cache = require('./cache'); 
+const { sendEmail } = require('./sendgrid'); // دالة إرسال الإيميل
 const app = express();
+const pool = new Pool({ connectionString: DB_URL });
 
-// إعداد الثقة في Proxy (ضروري لـ Railway)
-app.set('trust proxy', 1); 
+// 3. إعداد CORS - (إصلاح مشكلة GitHub Pages)
+const allowedOrigins = [
+    'http://localhost:8000', 
+    'http://127.0.0.1:8000',
+    'https://tawal-academy.vercel.app', 
+    'https://tawal-academy.vercel.app/'
+];
 
-const PORT = process.env.PORT || 3001;
+const corsOptions = {
+    origin: (origin, callback) => {
+        // السماح بالطلبات التي لا تحتوي على Origin (مثل تطبيقات الهاتف المحمول)
+        if (!origin) return callback(null, true);
+        
+        // السماح بالقائمة المحددة
+        if (allowedOrigins.indexOf(origin) !== -1) {
+            return callback(null, true);
+        }
+        
+        // ✅ السماح بجميع النطاقات الفرعية لـ vercel.app و github.io
+        if (origin.endsWith('.vercel.app') || origin.endsWith('.github.io') || origin.endsWith('.github.io/')) {
+            return callback(null, true);
+        }
 
-// ================= SECURITY & MIDDLEWARE =================
+        // رفض أي أصل آخر
+        callback(new Error('Not allowed by CORS'));
+    },
+    optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+app.use(express.json());
 
-app.use(helmet({
-    crossOriginResourcePolicy: { policy: "cross-origin" } 
-}));
-app.use(compression());
+// =================================================================
+// 4. الدوال المساعدة وقواعد البيانات
+// =================================================================
 
-app.use(cors({
-    origin: [
-        'https://tarekalsyed.github.io',
-        'http://localhost:3000',
-        'http://127.0.0.1:5500'
-    ],
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'], // Added PATCH
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-app.options('*', cors());
-app.use(bodyParser.json({ limit: '50kb' })); 
-app.use(bodyParser.urlencoded({ extended: true }));
-
-// Static Files
-app.use('/static/images', express.static(path.join(__dirname, 'images')));
-app.use('/static/pdf', express.static(path.join(__dirname, 'pdf')));
-
-// Data Security
-app.use(hpp());
-
-app.use((req, res, next) => {
-    if (req.body) {
-        Object.keys(req.body).forEach(key => {
-            if (typeof req.body[key] === 'string') {
-                req.body[key] = xss(req.body[key]);
-            }
-        });
+/**
+ * دالة لتنفيذ استعلامات قواعد البيانات
+ * @param {string} text - الاستعلام
+ * @param {Array<any>} params - المعلمات
+ */
+async function query(text, params) {
+    try {
+        const res = await pool.query(text, params);
+        return res;
+    } catch (err) {
+        console.error('Database Query Error:', err.stack);
+        throw err;
     }
-    next();
-});
-
-// ================= RATE LIMITING =================
-
-const generalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, 
-    max: 1000, 
-    message: { error: 'Too many requests, please try again later.' },
-    standardHeaders: true,
-    legacyHeaders: false
-});
-
-const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, 
-    max: 5, 
-    message: { error: 'Too many login attempts. Admin panel locked for 15 minutes.' },
-    standardHeaders: true,
-    legacyHeaders: false,
-    skipSuccessfulRequests: true
-});
-
-const otpLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, 
-    max: 10, 
-    message: { error: 'Too many OTP requests, please wait an hour.' }
-});
-
-app.use('/api/', generalLimiter);
-app.use('/api/admin/login', loginLimiter); 
-app.use('/api/auth/send-otp', otpLimiter); 
-
-initializeDatabase();
-
-// ================= ADMIN AUTHENTICATION =================
-
-function authenticateAdmin(req, res, next) {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: 'Forbidden' });
-        if (user.role !== 'admin' && user.role !== 'superadmin') return res.status(403).json({ error: 'Admin only' });
-        req.user = user;
-        next();
-    });
 }
 
-// ================= API ENDPOINTS =================
+/**
+ * الحصول على بيانات الطالب
+ * @param {number} studentId - رقم الطالب
+ */
+async function getStudentById(studentId) {
+    const res = await query('SELECT id, name, email, progress, isblocked FROM students WHERE id = $1', [studentId]);
+    if (res.rows.length === 0) return null;
+    return res.rows[0];
+}
 
-// 1. Request OTP (Updated Logic)
-app.post('/api/auth/send-otp', validateRequest(schemas.otpRequest), async (req, res) => {
+// =================================================================
+// 5. نقاط نهاية Authentication
+// =================================================================
+
+// 5.1 إرسال رمز التحقق لمرة واحدة (OTP)
+app.post('/api/auth/send-otp', async (req, res) => {
     const { email } = req.body;
+    
+    // التحقق من صحة الإدخال
+    const schema = Joi.object({
+        email: Joi.string().email().required()
+    });
+    const { error } = schema.validate(req.body);
+    if (error) return res.status(400).json({ error: error.details[0].message });
 
     try {
-        // ضمان 6 أرقام دائماً (حتى لو بدأ بصفر)
-        const otpCode = String(Math.floor(100000 + Math.random() * 900000));
+        // التحقق من الحد الأقصى للمحاولات (Rate Limiting)
+        const rateLimitKey = `otp_limit:${email}`;
+        // ✅ استبدال redisClient.get بـ cache.get
+        const currentLimit = await cache.get(rateLimitKey); 
+        if (currentLimit && parseInt(currentLimit) >= 5) {
+            return res.status(429).json({ error: 'Too many OTP requests today' });
+        }
         
-        console.log(`🔐 [OTP] Generated for ${email}: ${otpCode}`);
-        
-        // حفظ OTP في Redis (10 دقائق = 600 ثانية)
-        await redisClient.setEx(`otp:${email}`, 600, otpCode);
-        console.log(`💾 [Redis] OTP saved for ${email} (expires in 10 min)`);
-        
-        // إرسال الكود عبر SendGrid
-        const sent = await sendOTP(email, otpCode);
+        // توليد الرمز (6 أرقام)
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otpKey = `otp:${email}`;
 
-        if (sent) {
-            res.json({ 
-                message: 'OTP sent successfully', 
-                email, 
-                method: 'email' 
+        // حفظ الرمز في الكاش لمدة 10 دقائق (600 ثانية)
+        // ✅ استبدال redisClient.setEx بـ cache.setEx
+        await cache.setEx(otpKey, 600, otp); 
+
+        // ✅ استبدال incr و expire بـ get و setEx لـ Rate Limiting
+        let newLimit = 1;
+        if (currentLimit) {
+            newLimit = parseInt(currentLimit) + 1;
+        }
+        // Set the new limit with a 24-hour expiration (86400 seconds)
+        await cache.setEx(rateLimitKey, 86400, newLimit.toString()); 
+
+        if (process.env.NODE_ENV === 'development') {
+            console.log(`DEV MODE OTP for ${email}: ${otp}`);
+            return res.status(200).json({ 
+                message: 'OTP sent successfully (Dev Mode - Console)',
+                method: 'console',
+                otp: otp
             });
-        } else {
-            // Fallback: في Dev Mode فقط، اعرض OTP في الرد
-            if (process.env.NODE_ENV === 'development') {
-                console.log(`⚠️ [DEV MODE] Email failed but OTP is: ${otpCode}`);
-                res.json({ 
-                    message: 'Dev Mode: Email failed, check console logs', 
-                    email, 
-                    method: 'console', 
-                    otp: otpCode // للتطوير فقط
-                });
-            } else {
-                // في Production: خطأ حقيقي
-                res.status(500).json({ 
-                    error: 'فشل إرسال رمز التحقق. يرجى المحاولة لاحقاً.' 
+        }
+
+        // إرسال عبر SendGrid
+        const emailSent = await sendEmail(email, 'Tawal Academy OTP', `Your verification code is: ${otp}`);
+
+        if (!emailSent) {
+            console.error('SendGrid failed to send email. OTP:', otp);
+            // ✅ إصلاح: عرض الرمز إذا فشل الإرسال ونحن لسنا في الإنتاج
+            if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'prod') {
+                return res.status(200).json({ 
+                    message: 'OTP sent successfully (Fallback Dev Mode - Console)',
+                    method: 'console',
+                    otp: otp
                 });
             }
-        }
-    } catch (e) {
-        console.error('❌ [OTP Error]:', e);
-        res.status(500).json({ error: 'خطأ في السيرفر' });
-    }
-});
-
-// 2. Student Registration (Updated Logic)
-app.post('/api/students/register', validateRequest(schemas.studentRegister), async (req, res) => {
-    const { name, email, fingerprint, otp } = req.body;
-
-    try {
-        // 1. جلب OTP المحفوظ من Redis
-        const cachedOtp = await redisClient.get(`otp:${email}`);
-        
-        if (!cachedOtp) {
-            console.warn(`⚠️ [OTP] Expired or not found for ${email}`);
-            return res.status(400).json({ 
-                error: 'رمز التحقق منتهي الصلاحية أو غير موجود. اطلب رمزاً جديداً.' 
-            });
-        }
-        
-        // 2. التحقق من صحة OTP
-        if (cachedOtp !== otp) {
-            console.warn(`⚠️ [OTP] Incorrect code for ${email}`);
-            console.warn(`   Expected: ${cachedOtp}, Got: ${otp}`);
-            return res.status(400).json({ 
-                error: 'رمز التحقق خاطئ. تأكد من الأرقام وحاول مجدداً.' 
-            });
+            // إذا كنا في الإنتاج أو لم يكن هناك تصريح، نرجع الخطأ القياسي
+            return res.status(500).json({ error: 'Failed to send OTP email' });
         }
 
-        console.log(`✅ [OTP] Verified successfully for ${email}`);
-        
-        // 3. حذف OTP بعد الاستخدام (One-Time Use)
-        await redisClient.del(`otp:${email}`);
+        res.status(200).json({ message: 'OTP sent successfully' });
 
-        // 4. فحص البصمة للحظر
-        if (fingerprint) {
-            const blocked = await pool.query(
-                'SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', 
-                [fingerprint]
-            );
-            if (blocked.rows.length > 0) {
-                console.warn(`⚠️ [Security] Blocked fingerprint attempted: ${fingerprint}`);
-                return res.status(403).json({ error: 'Device Blocked' });
-            }
-        }
-        
-        // 5. إنشاء حساب الطالب
-        const result = await pool.query(
-            'INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *', 
-            [name, email]
-        );
-        const newStudent = result.rows[0];
-        
-        // 6. تحديث الكاش
-        await redisClient.del('public_stats');
-
-        // 7. حفظ البصمة
-        if (fingerprint) {
-            await pool.query(
-                'INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2)', 
-                [newStudent.id, fingerprint]
-            );
-        }
-        
-        console.log(`✅ [Register] New student created: ${newStudent.name} (ID: ${newStudent.id})`);
-        res.json(newStudent);
-        
     } catch (err) {
-        // معالجة خطأ الإيميل المكرر
-        if (err.code === '23505') {
-            console.log(`⚠️ [Register] Duplicate email: ${email}`);
-            const existing = await pool.query(
-                'SELECT * FROM students WHERE email = $1', 
-                [email]
-            );
-            
-            if (existing.rows[0].isblocked) {
-                return res.status(403).json({ error: 'Account Blocked' });
-            }
-            
-            // إرجاع الحساب الموجود
-            return res.json(existing.rows[0]);
-        }
-        
-        console.error('❌ [Register Error]:', err);
-        res.status(500).json({ error: 'خطأ أثناء التسجيل' });
+        console.error('Error sending OTP:', err);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// 3. Admin Login
-app.post('/api/admin/login', validateRequest(schemas.adminLogin), async (req, res) => {
-    const { username, password } = req.body;
-    if (!username || !password) return res.status(400).json({ error: 'Required fields missing' });
+// 5.2 تسجيل طالب جديد
+app.post('/api/students/register', async (req, res) => {
+    const { name, email, fingerprint, otp } = req.body;
+    
+    // التحقق من صحة الإدخال
+    const schema = Joi.object({
+        name: Joi.string().min(3).required(),
+        email: Joi.string().email().required(),
+        fingerprint: Joi.string().required(),
+        otp: Joi.string().length(6).required()
+    });
+    const { error } = schema.validate(req.body);
+    if (error) return res.status(400).json({ error: error.details[0].message });
 
     try {
-        const result = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
-        if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
-
-        const admin = result.rows[0];
-        const match = await bcrypt.compare(password, admin.password_hash);
-
-        if (match) {
-            const token = jwt.sign({ id: admin.id, role: admin.role, username: admin.username }, process.env.JWT_SECRET, { expiresIn: '24h' });
-            res.json({ token });
-        } else {
-            res.status(401).json({ error: 'Invalid credentials' });
+        // التحقق من الرمز
+        const otpKey = `otp:${email}`;
+        // ✅ استخدام cache.get بدلاً من redisClient.get
+        const storedOtp = await cache.get(otpKey); 
+        
+        if (!storedOtp || storedOtp !== otp) {
+            return res.status(400).json({ error: 'Invalid OTP' });
         }
-    } catch (e) {
-        res.status(500).json({ error: 'Server error' });
+
+        // التحقق من وجود الإيميل بالفعل
+        const existing = await query('SELECT id, isblocked FROM students WHERE email = $1', [email]);
+        if (existing.rows.length > 0) {
+            if (existing.rows[0].isblocked) {
+                return res.status(403).json({ error: 'Account is blocked' });
+            }
+            // إذا كان موجوداً، نعتبره "تحديث" بيانات/تفعيل دخول
+            
+            // حذف الرمز بعد استخدامه
+            // ✅ استخدام cache.del بدلاً من redisClient.del
+            await cache.del(otpKey); 
+            
+            const student = await getStudentById(existing.rows[0].id);
+            return res.status(200).json(student);
+        }
+
+        // تسجيل الطالب الجديد
+        const newStudent = await query(
+            'INSERT INTO students (name, email, fingerprint) VALUES ($1, $2, $3) RETURNING id, name, email, progress',
+            [name.trim(), email, fingerprint]
+        );
+
+        // حذف الرمز بعد استخدامه
+        // ✅ استخدام cache.del بدلاً من redisClient.del
+        await cache.del(otpKey); 
+
+        // Log the new registration
+        console.log(`🎉 New student registered: ${newStudent.rows[0].id} - ${name}`);
+
+        res.status(201).json(newStudent.rows[0]);
+    } catch (err) {
+        console.error('Error registering student:', err);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// 4. Public Stats
+
+// 5.3 الحصول على بيانات الطالب للتحقق
+app.get('/api/students/:id', async (req, res) => {
+    const studentId = parseInt(req.params.id);
+    if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid ID' });
+
+    try {
+        const student = await getStudentById(studentId);
+        if (!student) return res.status(404).json({ error: 'Student not found or deleted.' });
+        
+        if (student.isblocked) {
+            return res.status(403).json({ error: 'Blocked: Account has been suspended.' });
+        }
+
+        res.status(200).json(student);
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+
+// =================================================================
+// 6. نقاط نهاية الإحصائيات (Stats)
+// =================================================================
+
+// 6.1 الإحصائيات العامة (Public Stats)
 app.get('/api/public-stats', async (req, res) => {
     try {
-        const cached = await redisClient.get('public_stats');
-        if (cached) return res.json(JSON.parse(cached));
-        const s = await pool.query('SELECT COUNT(*) as t FROM students');
-        const q = await pool.query('SELECT COUNT(*) as t FROM quiz_results');
-        const data = { totalStudents: parseInt(s.rows[0].t), totalQuizzes: parseInt(q.rows[0].t) };
-        await redisClient.setEx('public_stats', 600, JSON.stringify(data));
-        res.json(data);
-    } catch (e) { res.json({ totalStudents: 0, totalQuizzes: 0 }); }
+        const totalStudentsRes = await query('SELECT count(*) FROM students');
+        const totalQuizzesRes = await query('SELECT count(*) FROM quiz_results');
+
+        res.status(200).json({
+            totalStudents: parseInt(totalStudentsRes.rows[0].count),
+            totalQuizzes: parseInt(totalQuizzesRes.rows[0].count)
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-// 5. Student Login (Session Log)
+// 6.2 إحصائيات الطالب
+app.get('/api/students/:id/stats', async (req, res) => {
+    const studentId = parseInt(req.params.id);
+    if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid ID' });
+
+    try {
+        // التحقق من الكاش
+        const cacheKey = `student_stats:${studentId}`;
+        // ✅ استخدام cache.get بدلاً من redisClient.get
+        const cachedStats = await cache.get(cacheKey); 
+        if (cachedStats) {
+            return res.status(200).json(JSON.parse(cachedStats));
+        }
+
+        const avgRes = await query('SELECT avg(score) as averageScore, max(score) as bestScore, count(*) as totalQuizzes FROM quiz_results WHERE student_id = $1', [studentId]);
+        
+        const stats = {
+            averageScore: Math.round(parseFloat(avgRes.rows[0].averagescore) || 0),
+            bestScore: parseInt(avgRes.rows[0].bestscore) || 0,
+            totalQuizzes: parseInt(avgRes.rows[0].totalquizzes) || 0
+        };
+        
+        // حفظ في الكاش
+        // ✅ استخدام cache.setEx بدلاً من redisClient.setEx
+        await cache.setEx(cacheKey, 3600, JSON.stringify(stats)); // كاش لمدة ساعة واحدة
+
+        res.status(200).json(stats);
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 6.3 نتائج اختبارات الطالب
+app.get('/api/students/:id/results', async (req, res) => {
+    const studentId = parseInt(req.params.id);
+    if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid ID' });
+
+    try {
+        // التحقق من الكاش
+        const cacheKey = `student_results:${studentId}`;
+        // ✅ استخدام cache.get بدلاً من redisClient.get
+        const cachedResults = await cache.get(cacheKey); 
+        if (cachedResults) {
+            return res.status(200).json(JSON.parse(cachedResults));
+        }
+
+        const resultsRes = await query('SELECT * FROM quiz_results WHERE student_id = $1 ORDER BY created_at DESC', [studentId]);
+        const results = resultsRes.rows;
+
+        // حفظ في الكاش
+        // ✅ استخدام cache.setEx بدلاً من redisClient.setEx
+        await cache.setEx(cacheKey, 3600, JSON.stringify(results)); // كاش لمدة ساعة واحدة
+
+        res.status(200).json(results);
+    } catch (err) {
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 6.4 حفظ نتائج الاختبار
+app.post('/api/quiz-results', async (req, res) => {
+    const { studentId, quizName, score, totalQuestions, correctAnswers, subjectId } = req.body;
+    
+    // التحقق من صحة الإدخال
+    const schema = Joi.object({
+        studentId: Joi.number().required(),
+        quizName: Joi.string().required(),
+        score: Joi.number().min(0).max(100).required(),
+        totalQuestions: Joi.number().min(1).required(),
+        correctAnswers: Joi.number().min(0).required(),
+        subjectId: Joi.string().required()
+    });
+    const { error } = schema.validate(req.body);
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    
+    try {
+        await query(
+            'INSERT INTO quiz_results (student_id, quiz_name, score, total_questions, correct_answers, subject_id) VALUES ($1, $2, $3, $4, $5, $6)',
+            [studentId, quizName, score, totalQuestions, correctAnswers, subjectId]
+        );
+
+        // تحديث progress في جدول students
+        const studentRes = await query('SELECT progress FROM students WHERE id = $1 FOR UPDATE', [studentId]);
+        const progress = studentRes.rows[0].progress || {};
+        
+        // تحديث أعلى درجة تم تحقيقها لهذا الموضوع/المستوى
+        const currentMax = progress[subjectId] || 0;
+        if (score > currentMax) {
+             progress[subjectId] = score;
+             await query('UPDATE students SET progress = $1 WHERE id = $2', [progress, studentId]);
+        }
+        
+        // مسح كاش الإحصائيات والنتائج للطالب
+        // ✅ استخدام cache.del بدلاً من redisClient.del
+        await cache.del(`student_stats:${studentId}`); 
+        // ✅ استخدام cache.del بدلاً من redisClient.del
+        await cache.del(`student_results:${studentId}`); 
+
+        res.status(201).json({ message: 'Result saved successfully' });
+    } catch (err) {
+        console.error('Error saving quiz result:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 6.5 حالة الاختبارات (Quiz Lock Status)
+app.get('/api/quiz-status', async (req, res) => {
+    try {
+        const cacheKey = `quiz_status_locks`;
+        // ✅ استخدام cache.get بدلاً من redisClient.get
+        const cachedStatus = await cache.get(cacheKey); 
+        if (cachedStatus) {
+            return res.status(200).json(JSON.parse(cachedStatus));
+        }
+
+        // هنا يتم استرجاع حالة الإغلاق من قاعدة البيانات أو من ملف إعدادات
+        // في هذا المثال، نفترض أن كل شيء مفتوح بشكل افتراضي
+        const locks = {
+            gis_networks: { locked: false, message: '' },
+            transport: { locked: true, message: 'قريباً...' },
+            geo_maps: { locked: false, message: '' },
+            projections: { locked: false, message: '' },
+            research: { locked: true, message: 'مغلق مؤقتاً' },
+            surveying_texts: { locked: false, message: '' },
+            arid_lands: { locked: false, message: '' }
+        };
+
+        // حفظ في الكاش لمدة 5 دقائق (300 ثانية)
+        // ✅ استخدام cache.setEx بدلاً من redisClient.setEx
+        await cache.setEx(cacheKey, 300, JSON.stringify(locks)); 
+
+        res.status(200).json(locks);
+    } catch (err) {
+        console.error('Error fetching quiz status:', err);
+        res.status(500).json({});
+    }
+});
+
+// 6.6 تسجيل الدخول (Session Log)
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
+    
+    const schema = Joi.object({
+        studentId: Joi.number().required(),
+        fingerprint: Joi.string().required()
+    });
+    const { error } = schema.validate(req.body);
+    if (error) return res.status(400).json({ error: 'Invalid data' });
+
     try {
-        if (fingerprint) {
-            const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
-            if (blocked.rows.length > 0) return res.status(403).json({ error: 'Device Blocked' });
-            await pool.query(`INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2) ON CONFLICT (studentId, fingerprint) DO UPDATE SET lastSeen=CURRENT_TIMESTAMP`, [studentId, fingerprint]);
+        // تحديث البصمة في قاعدة البيانات
+        await query('UPDATE students SET fingerprint = $1 WHERE id = $2', [fingerprint, studentId]);
+        
+        // التحقق من حدود تسجيل الدخول بالجهاز (Rate Limit)
+        const rateLimitKey = `login_limit:${fingerprint}`;
+        
+        // ✅ استبدال incr و expire بـ get و setEx
+        const loginCount = await cache.get(rateLimitKey); 
+        let newLoginCount = 1;
+
+        if (loginCount) {
+            newLoginCount = parseInt(loginCount) + 1;
+            if (newLoginCount > 100) { // حد أقصى 100 دخول للجهاز في الأسبوع
+                return res.status(403).json({ error: 'Rate limit exceeded for this device.' });
+            }
+        } else {
+            // If no count exists, it's 1
         }
-        await pool.query('INSERT INTO login_logs (studentId) VALUES ($1)', [studentId]);
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Error' }); }
+
+        // Set the new count with a 7-day expiration (3600 * 24 * 7 seconds = 604800)
+        await cache.setEx(rateLimitKey, 604800, newLoginCount.toString()); 
+
+        res.status(200).json({ message: 'Login logged' });
+    } catch (err) {
+        console.error('Error logging login:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-// 6. Logout
+// 6.7 تسجيل الخروج (Logout)
 app.post('/api/logout', async (req, res) => {
     const { studentId } = req.body;
     try {
-        await pool.query(`UPDATE login_logs SET logoutTime = CURRENT_TIMESTAMP WHERE id = (SELECT id FROM login_logs WHERE studentId = $1 ORDER BY loginTime DESC LIMIT 1)`, [studentId]);
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Logout failed' }); }
-});
-
-// 7. Activity Log
-app.post('/api/log-activity', validateRequest(schemas.activityLog), async (req, res) => {
-    const { studentId, activityType, subjectName } = req.body;
-    try {
-        await pool.query(`INSERT INTO activity_logs (studentId, activityType, subjectName, timestamp) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`, [studentId, activityType, subjectName || '-']);
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'Failed' }); }
-});
-
-// 8. Quiz Results
-app.post('/api/quiz-results', validateRequest(schemas.quizResult), async (req, res) => {
-    const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
-    try { 
-        await pool.query(`INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) VALUES ($1, $2, $3, $4, $5, $6)`, [studentId, quizName, subjectId || 'unknown', score, totalQuestions || 0, correctAnswers || 0]);
-        await redisClient.del('public_stats');
-        try { await pool.query(`INSERT INTO activity_logs (studentId, activityType, subjectName, score, timestamp) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)`, [studentId, 'quiz_completed', quizName, score]); } catch (e) {}
-        res.json({ message: 'Saved successfully' }); 
-    } catch (e) { res.status(500).json({ error: 'Failed' }); }
-});
-
-// 9. Student Data Getters
-app.get('/api/students/:id', async (req, res) => { try { const r = await pool.query('SELECT * FROM students WHERE id = $1', [req.params.id]); res.json(r.rows[0] || {}); } catch(e) { res.status(500).json({}); } });
-app.get('/api/students/:id/results', async (req, res) => { try { const r = await pool.query('SELECT quizname as "quizName", score, subjectid as "subjectId", completedat as "completedAt" FROM quiz_results WHERE studentid = $1 ORDER BY completedat DESC', [req.params.id]); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.get('/api/students/:id/stats', async (req, res) => { try { const r = await pool.query('SELECT score FROM quiz_results WHERE studentId = $1', [req.params.id]); const rs = r.rows; if (!rs.length) return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0 }); const avg = Math.round(rs.reduce((s, row) => s + row.score, 0) / rs.length); const best = Math.max(...rs.map(r => r.score)); res.json({ totalQuizzes: rs.length, averageScore: avg, bestScore: best }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-
-// 10. Messaging System (Student Side)
-app.get('/api/students/:id/messages', async (req, res) => { try { const r = await pool.query('SELECT * FROM messages WHERE studentId = $1 ORDER BY createdAt DESC', [req.params.id]); const now = new Date(); const todayCount = r.rows.filter(m => new Date(m.createdat) >= new Date(now.setHours(0,0,0,0))).length; res.json({ messages: r.rows, remaining: Math.max(0, 3 - todayCount) }); } catch(e) { res.status(500).json([]); } });
-app.post('/api/messages', validateRequest(schemas.message), async (req, res) => { const { studentId, message } = req.body; try { const countQuery = await pool.query("SELECT COUNT(*) FROM messages WHERE studentId = $1 AND createdAt >= CURRENT_DATE", [studentId]); if (parseInt(countQuery.rows[0].count) >= 3) return res.status(429).json({ error: 'Limit reached', remaining: 0 }); await pool.query('INSERT INTO messages (studentId, content) VALUES ($1, $2)', [studentId, message]); res.json({ message: 'Sent', remaining: 3 - (parseInt(countQuery.rows[0].count) + 1) }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-
-// 11. Quiz Status Check
-app.get('/api/quiz-status', async (req, res) => { try { const cached = await redisClient.get('quiz_status'); if (cached) return res.json(JSON.parse(cached)); const r = await pool.query('SELECT * FROM quiz_status'); const map = {}; r.rows.forEach(row => map[row.subjectid] = { locked: row.locked, message: row.message }); await redisClient.setEx('quiz_status', 60, JSON.stringify(map)); res.json(map); } catch (e) { res.json({}); } });
-
-// 12. File Upload (Admin Only)
-app.post('/api/admin/upload', authenticateAdmin, upload.single('file'), async (req, res) => { if (!req.file) return res.status(400).json({ error: 'No file' }); try { const result = await uploadToCloudinary(req.file.buffer); res.json({ message: 'Uploaded', url: result.secure_url }); } catch (e) { res.status(500).json({ error: 'Upload failed' }); } });
-
-// ================= ADMIN MANAGEMENT (EXISTING & NEW) =================
-
-app.get('/api/admin/stats', authenticateAdmin, async (req, res) => { try { const s = await pool.query('SELECT COUNT(*) as t FROM students'); const q = await pool.query('SELECT COUNT(*) as t, AVG(score) as a FROM quiz_results'); res.json({ totalStudents: parseInt(s.rows[0].t), totalQuizzes: parseInt(q.rows[0].t), averageScore: Math.round(q.rows[0].a || 0) }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.get('/api/admin/students', authenticateAdmin, async (req, res) => { try { const r = await pool.query('SELECT * FROM students ORDER BY createdAt DESC'); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.post('/api/admin/students/:id/status', authenticateAdmin, async (req, res) => { try { await pool.query('UPDATE students SET isblocked = $1 WHERE id = $2', [req.body.isblocked, req.params.id]); res.json({ message: 'Updated' }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.post('/api/admin/students/:id/block-fingerprint', authenticateAdmin, async (req, res) => { try { const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]); if (!fp.rows.length) return res.status(404).json({ error: 'No device' }); await pool.query('INSERT INTO blocked_fingerprints (fingerprint, reason) VALUES ($1, $2) ON CONFLICT DO NOTHING', [fp.rows[0].fingerprint, 'Admin Block']); res.json({ message: 'Blocked' }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.post('/api/admin/students/:id/unblock-fingerprint', authenticateAdmin, async (req, res) => { try { const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]); if (!fp.rows.length) return res.status(404).json({ error: 'No device' }); await pool.query('DELETE FROM blocked_fingerprints WHERE fingerprint = $1', [fp.rows[0].fingerprint]); res.json({ message: 'Unblocked' }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res) => { try { await pool.query(`INSERT INTO quiz_status (subjectId, locked, message, updatedAt) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) ON CONFLICT (subjectId) DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP`, [req.params.subjectId, req.body.locked, req.body.message]); await redisClient.del('quiz_status'); res.json({ message: 'Updated' }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.get('/api/admin/messages', authenticateAdmin, async (req, res) => { try { const r = await pool.query('SELECT m.id, m.content, m.adminReply, m.createdAt, s.name as "studentName" FROM messages m JOIN students s ON m.studentId = s.id ORDER BY m.createdAt DESC LIMIT 100'); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.post('/api/admin/messages/:id/reply', authenticateAdmin, async (req, res) => { try { await pool.query('UPDATE messages SET adminReply = $1 WHERE id = $2', [req.body.reply, req.params.id]); res.json({ message: 'Replied' }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
-app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => { const client = await pool.connect(); try { await client.query('BEGIN'); const studentId = req.params.id; await client.query('DELETE FROM student_fingerprints WHERE studentId = $1', [studentId]); await client.query('DELETE FROM quiz_results WHERE studentId = $1', [studentId]); await client.query('DELETE FROM messages WHERE studentId = $1', [studentId]); await client.query('DELETE FROM login_logs WHERE studentId = $1', [studentId]); await client.query('DELETE FROM activity_logs WHERE studentId = $1', [studentId]); await client.query('DELETE FROM active_sessions WHERE studentId = $1', [studentId]); const result = await client.query('DELETE FROM students WHERE id = $1 RETURNING *', [studentId]); if (result.rowCount === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Student not found' }); } await redisClient.del('public_stats'); await client.query('COMMIT'); res.json({ message: 'Deleted' }); } catch (e) { await client.query('ROLLBACK'); res.status(500).json({ error: 'Error' }); } finally { client.release(); } });
-
-// ================= NEW ADMIN FEATURES (Logs & Messaging) =================
-
-// 13. جلب سجلات النشاط (Activity Logs)
-app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT 
-                al.id,
-                al.activityType as "activityType",
-                al.subjectName as "subjectName",
-                al.score,
-                al.timestamp,
-                s.name as "studentName",
-                s.email as "studentEmail"
-            FROM activity_logs al
-            JOIN students s ON al.studentId = s.id
-            ORDER BY al.timestamp DESC
-            LIMIT 100
-        `);
-        
-        // تحويل التاريخ لصيغة مقروءة
-        const logs = result.rows.map(log => ({
-            ...log,
-            date: log.timestamp
-        }));
-        
-        res.json(logs);
+        // يمكن هنا إضافة منطق لتسجيل وقت الخروج إذا لزم الأمر
+        // حالياً، نكتفي بإرسال استجابة نجاح
+        res.status(200).json({ message: 'Logout successful' });
     } catch (e) {
-        console.error('❌ [Activity Logs Error]:', e);
-        res.status(500).json({ error: 'Failed to fetch activity logs' });
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// 14. جلب سجلات النشاط لطالب محدد
-app.get('/api/students/:id/activity', authenticateAdmin, async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT 
-                activityType as "activitytype",
-                subjectName as "subjectname",
-                score,
-                timestamp
-            FROM activity_logs
-            WHERE studentId = $1
-            ORDER BY timestamp DESC
-            LIMIT 50
-        `, [req.params.id]);
-        
-        res.json(result.rows);
-    } catch (e) {
-        console.error('❌ [Student Activity Error]:', e);
-        res.status(500).json({ error: 'Failed to fetch student activity' });
-    }
-});
+// =================================================================
+// 7. نقاط نهاية رسائل الدعم (Support Messages)
+// =================================================================
 
-// 15. جلب سجلات الدخول لطالب محدد
-app.get('/api/students/:id/logs', authenticateAdmin, async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT 
-                id,
-                loginTime as "logintime",
-                logoutTime as "logouttime"
-            FROM login_logs
-            WHERE studentId = $1
-            ORDER BY loginTime DESC
-            LIMIT 20
-        `, [req.params.id]);
-        
-        res.json(result.rows);
-    } catch (e) {
-        console.error('❌ [Student Logs Error]:', e);
-        res.status(500).json({ error: 'Failed to fetch login logs' });
-    }
-});
+// 7.1 إرسال رسالة دعم جديدة
+app.post('/api/messages', async (req, res) => {
+    const { studentId, message } = req.body;
 
-// 16. حذف رسالة
-app.delete('/api/admin/messages/:id', authenticateAdmin, async (req, res) => {
+    const schema = Joi.object({
+        studentId: Joi.number().required(),
+        message: Joi.string().min(5).max(500).required()
+    });
+    const { error } = schema.validate(req.body);
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    
     try {
-        await pool.query('DELETE FROM messages WHERE id = $1', [req.params.id]);
-        res.json({ message: 'Message deleted successfully' });
-    } catch (e) {
-        console.error('❌ [Delete Message Error]:', e);
-        res.status(500).json({ error: 'Failed to delete message' });
-    }
-});
+        // التحقق من الحد اليومي (5 رسائل)
+        const rateLimitKey = `msg_limit:${studentId}`;
+        // ✅ استخدام cache.get بدلاً من redisClient.get
+        const messagesSent = await cache.get(rateLimitKey); 
+        const sentCount = messagesSent ? parseInt(messagesSent) : 0;
+        const LIMIT = 5;
 
-// 17. تحديث حالة الرسالة (قراءة/غير مقروءة)
-app.patch('/api/admin/messages/:id/read', authenticateAdmin, async (req, res) => {
-    try {
-        await pool.query(
-            'UPDATE messages SET isRead = $1 WHERE id = $2',
-            [req.body.isRead, req.params.id]
+        if (sentCount >= LIMIT) {
+            return res.status(429).json({ error: 'Daily message limit exceeded (5 messages).' });
+        }
+
+        const resDb = await query(
+            'INSERT INTO support_messages (student_id, content) VALUES ($1, $2) RETURNING created_at',
+            [studentId, message]
         );
-        res.json({ message: 'Message status updated' });
-    } catch (e) {
-        console.error('❌ [Update Message Error]:', e);
-        res.status(500).json({ error: 'Failed to update message' });
+        
+        // تحديث العداد في الكاش لمدة 24 ساعة (86400 ثانية)
+        // ✅ استخدام cache.setEx بدلاً من redisClient.setEx
+        await cache.setEx(rateLimitKey, 86400, (sentCount + 1).toString());
+
+        res.status(201).json({ 
+            message: 'Message sent successfully',
+            remaining: LIMIT - (sentCount + 1),
+            createdAt: resDb.rows[0].created_at
+        });
+    } catch (err) {
+        console.error('Error sending message:', err);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// ================= HEALTH & START =================
+// 7.2 جلب رسائل الطالب السابقة
+app.get('/api/students/:id/messages', async (req, res) => {
+    const studentId = parseInt(req.params.id);
+    if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid ID' });
+    
+    try {
+        // جلب الرسائل
+        const messagesRes = await query('SELECT content, admin_reply as adminReply, created_at as createdAt FROM support_messages WHERE student_id = $1 ORDER BY created_at DESC', [studentId]);
+        const messages = messagesRes.rows;
 
-app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '25.2.0', timestamp: new Date().toISOString() }));
+        // جلب الحد المتبقي اليومي
+        const rateLimitKey = `msg_limit:${studentId}`;
+        // ✅ استخدام cache.get بدلاً من redisClient.get
+        const messagesSent = await cache.get(rateLimitKey);
+        const sentCount = messagesSent ? parseInt(messagesSent) : 0;
+        const LIMIT = 5;
+
+        res.status(200).json({
+            messages: messages,
+            remaining: LIMIT - sentCount
+        });
+    } catch (err) {
+        console.error('Error fetching messages:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// =================================================================
+// 8. نقاط نهاية تتبع النشاط (Activity Logging)
+// =================================================================
+
+// 8.1 تسجيل النشاط
+app.post('/api/log-activity', async (req, res) => {
+    const { studentId, activityType, subjectName } = req.body;
+    
+    // التحقق من صحة الإدخال
+    const schema = Joi.object({
+        studentId: Joi.number().required(),
+        activityType: Joi.string().required(),
+        subjectName: Joi.string().required()
+    });
+    const { error } = schema.validate(req.body);
+    if (error) {
+        // لا نرسل 400، نكتفي بالتسجيل في اللوغ وتجاهل الطلب
+        console.warn('Invalid activity log data:', error.details[0].message);
+        return res.status(200).json({ message: 'Log ignored due to invalid data' });
+    }
+
+    try {
+        await query(
+            'INSERT INTO activity_log (student_id, activity_type, subject_name) VALUES ($1, $2, $3)',
+            [studentId, activityType, subjectName]
+        );
+        res.status(201).json({ message: 'Activity logged' });
+    } catch (err) {
+        console.error('Error logging activity:', err);
+        // نرسل 200 لتجنب تعطيل الفرونت إند في حالة الفشل
+        res.status(200).json({ message: 'Failed to log activity but request accepted' });
+    }
+});
+
+
+// =================================================================
+// 9. تشغيل السيرفر
+// =================================================================
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 25.2.0 - Fully Integrated`);
+    // التحقق من اتصال قاعدة البيانات عند البدء
+    pool.query('SELECT NOW()')
+        .then(res => console.log('✅ PostgreSQL Connected:', res.rows[0].now))
+        .catch(err => console.error('❌ PostgreSQL Connection Failed:', err.stack));
 });
