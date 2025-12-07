@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 20.0.0 (Added Public Stats Endpoint for Real Data)
+ * SERVER.JS - Version 21.0.0 (Enhanced Security & Modular DB)
  * =================================================================================
  */
 
@@ -8,12 +8,12 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const { Pool } = require('pg');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const compression = require('compression'); 
+const { pool, initializeDatabase } = require('./database'); // 🔥 Import Database Module
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -37,126 +37,25 @@ app.options('*', cors());
 app.use(bodyParser.json({ limit: '50kb' })); 
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Database Connection
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-});
-
-// Rate Limiting
+// Rate Limiting (Optimized as per report)
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
-    max: 3000, 
+    max: 1000, // Reduced from 3000 for better security
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
-app.use('/api/', generalLimiter);
+const loginLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 20, // Strict limit for logins
+    message: { error: 'Too many login attempts, please try again later.' }
+});
 
-// Database Initialization
-async function initializeDatabase() {
-    const client = await pool.connect();
-    try {
-        console.log('🔄 [DB] Checking tables & connection...');
-        
-        // Students table
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS students (
-                id SERIAL PRIMARY KEY, 
-                name TEXT NOT NULL, 
-                email TEXT UNIQUE, 
-                createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, 
-                isBlocked BOOLEAN DEFAULT FALSE
-            )
-        `);
-        
-        // Quiz results table
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS quiz_results (
-                id SERIAL PRIMARY KEY, 
-                studentId INTEGER NOT NULL REFERENCES students(id), 
-                quizName TEXT NOT NULL, 
-                subjectId TEXT, 
-                score INTEGER NOT NULL, 
-                totalQuestions INTEGER NOT NULL, 
-                correctAnswers INTEGER NOT NULL, 
-                completedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // Messages table
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS messages (
-                id SERIAL PRIMARY KEY, 
-                studentId INTEGER NOT NULL REFERENCES students(id), 
-                content TEXT NOT NULL, 
-                adminReply TEXT, 
-                isRead BOOLEAN DEFAULT FALSE, 
-                createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // Login logs table
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS login_logs (
-                id SERIAL PRIMARY KEY, 
-                studentId INTEGER NOT NULL REFERENCES students(id), 
-                loginTime TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, 
-                logoutTime TIMESTAMPTZ
-            )
-        `);
-        
-        // 🔥 Activity logs table
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS activity_logs (
-                id SERIAL PRIMARY KEY, 
-                studentId INTEGER NOT NULL REFERENCES students(id), 
-                activityType TEXT NOT NULL, 
-                subjectName TEXT, 
-                score INTEGER,
-                timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // Student fingerprints table
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS student_fingerprints (
-                id SERIAL PRIMARY KEY, 
-                studentId INTEGER NOT NULL REFERENCES students(id), 
-                fingerprint TEXT NOT NULL, 
-                lastSeen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP, 
-                UNIQUE(studentId, fingerprint)
-            )
-        `);
-        
-        // Blocked fingerprints table
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS blocked_fingerprints (
-                id SERIAL PRIMARY KEY, 
-                fingerprint TEXT UNIQUE NOT NULL, 
-                reason TEXT, 
-                createdAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        // Quiz status table
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS quiz_status (
-                id SERIAL PRIMARY KEY, 
-                subjectId TEXT UNIQUE NOT NULL, 
-                locked BOOLEAN DEFAULT FALSE, 
-                message TEXT, 
-                updatedAt TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        
-        console.log('✅ [DB] Database Ready & Secured.');
-    } catch (err) { 
-        console.error('❌ [DB] Critical Error:', err); 
-    } finally { 
-        client.release(); 
-    }
-}
+app.use('/api/', generalLimiter);
+app.use('/api/admin/login', loginLimiter); // Apply strict limit to admin login
+
+// Initialize Database (Tables are now managed in database.js)
+initializeDatabase();
 
 // Admin Authentication Middleware
 function authenticateAdmin(req, res, next) {
@@ -165,7 +64,8 @@ function authenticateAdmin(req, res, next) {
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) return res.status(403).json({ error: 'Forbidden' });
-        if (user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+        // Check for role in token
+        if (user.role !== 'admin' && user.role !== 'superadmin') return res.status(403).json({ error: 'Admin only' });
         req.user = user;
         next();
     });
@@ -173,8 +73,7 @@ function authenticateAdmin(req, res, next) {
 
 // ================= API ENDPOINTS =================
 
-// 🔥🔥🔥 NEW ENDPOINT: Public Stats (For Homepage) 🔥🔥🔥
-// هذا هو الكود الجديد الذي يسمح للصفحة الرئيسية بجلب الأرقام الحقيقية
+// Public Stats (For Homepage)
 app.get('/api/public-stats', async (req, res) => {
     try {
         const s = await pool.query('SELECT COUNT(*) as t FROM students');
@@ -185,23 +84,40 @@ app.get('/api/public-stats', async (req, res) => {
             totalQuizzes: parseInt(q.rows[0].t)
         });
     } catch (e) {
-        // في حالة الخطأ نعيد أصفار
         console.error('Stats Error:', e);
         res.json({ totalStudents: 0, totalQuizzes: 0 });
     }
 });
-// 🔥🔥🔥 END NEW ENDPOINT 🔥🔥🔥
 
-// Admin Login
+// 🔥 Updated Admin Login (Uses Database Now)
 app.post('/api/admin/login', async (req, res) => {
-    const { password } = req.body;
-    const adminHash = process.env.ADMIN_PASSWORD_HASH;
-    if (!adminHash) return res.status(500).json({ error: 'Config Error' });
-    if (await bcrypt.compare(password, adminHash)) {
-        const token = jwt.sign({ role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '24h' });
-        res.json({ token });
-    } else {
-        res.status(401).json({ error: 'Wrong password' });
+    const { username, password } = req.body;
+    // Fallback for old frontend that might only send password (defaults to 'admin')
+    const userToFind = username || 'admin'; 
+
+    try {
+        const result = await pool.query('SELECT * FROM admins WHERE username = $1', [userToFind]);
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        const admin = result.rows[0];
+        const match = await bcrypt.compare(password, admin.password_hash);
+
+        if (match) {
+            const token = jwt.sign(
+                { id: admin.id, role: admin.role, username: admin.username }, 
+                process.env.JWT_SECRET, 
+                { expiresIn: '24h' }
+            );
+            res.json({ token });
+        } else {
+            res.status(401).json({ error: 'Invalid credentials' });
+        }
+    } catch (e) {
+        console.error('Admin Login Error:', e);
+        res.status(500).json({ error: 'Server error' });
     }
 });
 
@@ -223,6 +139,9 @@ app.post('/api/students/register', async (req, res) => {
     const { name, email, fingerprint } = req.body;
     if (!name || !email) return res.status(400).json({ error: 'Missing data' });
     
+    // Simple Input Validation
+    if (name.length > 100 || email.length > 255) return res.status(400).json({ error: 'Input too long' });
+
     if (fingerprint) {
         const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
         if (blocked.rows.length > 0) return res.status(403).json({ error: 'Device Blocked' });
@@ -284,7 +203,7 @@ app.get('/api/students/:id/messages', async (req, res) => {
     }
 });
 
-// Login Tracking
+// Login Tracking (Updated for Active Sessions in future)
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
     
@@ -303,19 +222,20 @@ app.post('/api/login', async (req, res) => {
         
         await pool.query('INSERT INTO login_logs (studentId) VALUES ($1)', [studentId]);
         
+        // Future: Insert into active_sessions here
+        
         res.json({ success: true });
     } catch (e) { 
         res.status(500).json({ error: 'Error' }); 
     }
 });
 
-// 🔥🔥🔥 نقطة اتصال تسجيل الخروج الجديدة 🔥🔥🔥
+// Logout
 app.post('/api/logout', async (req, res) => {
     const { studentId } = req.body;
     if (!studentId) return res.status(400).json({ error: 'Missing studentId' });
     
     try {
-        // تحديث آخر سجل دخول لم يتم تسجيل خروجه بعد
         await pool.query(`
             UPDATE login_logs 
             SET logoutTime = CURRENT_TIMESTAMP 
@@ -334,7 +254,7 @@ app.post('/api/logout', async (req, res) => {
     }
 });
 
-// Endpoint new activity logger
+// Activity Logger
 app.post('/api/log-activity', async (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
     if (!studentId || !activityType) return res.status(400).json({ error: 'Missing data' });
@@ -352,37 +272,27 @@ app.post('/api/log-activity', async (req, res) => {
     }
 });
 
-// Quiz Results (حفظ النتيجة + تسجيل النشاط)
+// Quiz Results
 app.post('/api/quiz-results', async (req, res) => {
     const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
     
-    console.log('📝 [Quiz Result] Received:', { studentId, quizName, subjectId, score });
-    
     if (!studentId || !quizName || score === undefined) {
-        console.error('❌ [Quiz Result] Missing required fields');
         return res.status(400).json({ error: 'Missing required fields' });
     }
     
     try { 
-        // 1. حفظ النتيجة
         await pool.query(`
             INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) 
             VALUES ($1, $2, $3, $4, $5, $6)
         `, [studentId, quizName, subjectId || 'unknown', score, totalQuestions || 0, correctAnswers || 0]);
         
-        console.log('✅ [Quiz Result] Saved to quiz_results table');
-        
-        // 2. 🔥 تسجيل النشاط (مع التأكد من وجود الجدول والأعمدة)
         try {
             await pool.query(`
                 INSERT INTO activity_logs (studentId, activityType, subjectName, score, timestamp) 
                 VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
             `, [studentId, 'quiz_completed', quizName, score]);
-            
-            console.log('✅ [Activity] Saved to activity_logs table');
         } catch (logErr) {
             console.error('⚠️ [Activity] Failed to save activity log:', logErr.message);
-            // لا نفشل الطلب الأساسي
         }
         
         res.json({ message: 'Saved successfully' }); 
@@ -445,7 +355,7 @@ app.get('/api/students/:id/stats', async (req, res) => {
     } 
 });
 
-// 🔥 Get Student Activity Logs
+// Get Student Activity Logs
 app.get('/api/students/:id/activity', async (req, res) => {
     try {
         const query = `
@@ -459,19 +369,14 @@ app.get('/api/students/:id/activity', async (req, res) => {
             ORDER BY timestamp DESC
             LIMIT 50
         `;
-        
         const result = await pool.query(query, [req.params.id]);
-        
-        console.log(`✅ [Activity] Fetched ${result.rows.length} activities for student ${req.params.id}`);
-        
         res.json(result.rows);
     } catch (e) {
-        console.error('❌ [Activity] Error:', e);
         res.status(500).json({ error: 'Error fetching activity' });
     }
 });
 
-// 🔥 Get Student Login Logs
+// Get Student Login Logs
 app.get('/api/students/:id/logs', async (req, res) => {
     try {
         const query = `
@@ -484,14 +389,9 @@ app.get('/api/students/:id/logs', async (req, res) => {
             ORDER BY logintime DESC
             LIMIT 50
         `;
-        
         const result = await pool.query(query, [req.params.id]);
-        
-        console.log(`✅ [Logs] Fetched ${result.rows.length} logs for student ${req.params.id}`);
-        
         res.json(result.rows);
     } catch (e) {
-        console.error('❌ [Logs] Error:', e);
         res.status(500).json({ error: 'Error fetching logs' });
     }
 });
@@ -510,7 +410,7 @@ app.get('/api/quiz-status', async (req, res) => {
 
 // ================= ADMIN ROUTES =================
 
-// 🔥 Get Recent Activity (All Students)
+// Get Recent Activity (All Students)
 app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
     try {
         const query = `
@@ -525,14 +425,9 @@ app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
             ORDER BY al.timestamp DESC
             LIMIT 20
         `;
-        
         const result = await pool.query(query);
-        
-        console.log(`✅ [Admin Activity] Fetched ${result.rows.length} recent activities`);
-        
         res.json(result.rows);
     } catch (e) {
-        console.error('❌ [Admin Activity] Error:', e);
         res.status(500).json({ error: 'Failed to fetch activity logs' });
     }
 });
@@ -610,13 +505,8 @@ app.post('/api/admin/students/:id/status', authenticateAdmin, async (req, res) =
 app.post('/api/admin/students/:id/block-fingerprint', authenticateAdmin, async (req, res) => { 
     try { 
         const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]); 
-        
-        if (!fp.rows.length) {
-            return res.status(404).json({ error: 'No device found for this student' }); 
-        }
-        
+        if (!fp.rows.length) return res.status(404).json({ error: 'No device found for this student' }); 
         await pool.query('INSERT INTO blocked_fingerprints (fingerprint, reason) VALUES ($1, $2) ON CONFLICT DO NOTHING', [fp.rows[0].fingerprint, 'Admin Block']); 
-        
         res.json({ message: 'Blocked' }); 
     } catch (e) { 
         res.status(500).json({ error: 'Error' }); 
@@ -626,13 +516,8 @@ app.post('/api/admin/students/:id/block-fingerprint', authenticateAdmin, async (
 app.post('/api/admin/students/:id/unblock-fingerprint', authenticateAdmin, async (req, res) => { 
     try { 
         const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]); 
-        
-        if (!fp.rows.length) {
-            return res.status(404).json({ error: 'No device found' }); 
-        }
-        
+        if (!fp.rows.length) return res.status(404).json({ error: 'No device found' }); 
         await pool.query('DELETE FROM blocked_fingerprints WHERE fingerprint = $1', [fp.rows[0].fingerprint]); 
-        
         res.json({ message: 'Unblocked' }); 
     } catch (e) { 
         res.status(500).json({ error: 'Error' }); 
@@ -648,7 +533,6 @@ app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res
             ON CONFLICT (subjectId) 
             DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP
         `, [req.params.subjectId, req.body.locked, req.body.message]); 
-        
         res.json({ message: 'Updated' }); 
     } catch (e) { 
         res.status(500).json({ error: 'Error' }); 
@@ -671,33 +555,27 @@ app.get('/api/admin/login-logs', authenticateAdmin, async (req, res) => {
     } 
 });
 
-// Delete Student (Complete Removal)
+// Delete Student
 app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         const studentId = req.params.id;
-        
-        // Delete all related data
         await client.query('DELETE FROM student_fingerprints WHERE studentId = $1', [studentId]);
         await client.query('DELETE FROM quiz_results WHERE studentId = $1', [studentId]);
         await client.query('DELETE FROM messages WHERE studentId = $1', [studentId]);
         await client.query('DELETE FROM login_logs WHERE studentId = $1', [studentId]);
         await client.query('DELETE FROM activity_logs WHERE studentId = $1', [studentId]);
-        
-        // Delete student
+        await client.query('DELETE FROM active_sessions WHERE studentId = $1', [studentId]); // 🔥 Delete sessions too
         const result = await client.query('DELETE FROM students WHERE id = $1 RETURNING *', [studentId]);
-        
         if (result.rowCount === 0) { 
             await client.query('ROLLBACK'); 
             return res.status(404).json({ error: 'Student not found' }); 
         }
-        
         await client.query('COMMIT');
         res.json({ message: 'Deleted' });
     } catch (e) {
         await client.query('ROLLBACK');
-        console.error(e);
         res.status(500).json({ error: 'Error' });
     } finally { 
         client.release(); 
@@ -707,17 +585,13 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '20.0.0', 
-    compression: true,
-    activityTracking: 'FULLY FIXED ✅',
-    publicStats: 'ENABLED ✅',
-    logoutFeature: 'ENABLED ✅',
+    version: '21.0.0', 
+    security: 'ENHANCED (DB SPLIT) ✅',
     timestamp: new Date().toISOString()
 }));
 
 // Start Server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 20.0.0 - Activity tracking & Public Stats fully functional!`);
-    initializeDatabase();
+    console.log(`✅ Version 21.0.0 - Database Modularized & Secured`);
 });
