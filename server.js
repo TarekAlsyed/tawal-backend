@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 25.1.0 (UPDATED with Enhanced OTP & Register Logs)
+ * SERVER.JS - Version 25.2.0 (FINAL COMPLETE: OTP + Logs + Admin Features)
  * =================================================================================
  */
 
@@ -43,7 +43,7 @@ app.use(cors({
         'http://127.0.0.1:5500'
     ],
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'], // Added PATCH
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
@@ -330,7 +330,7 @@ app.get('/api/students/:id', async (req, res) => { try { const r = await pool.qu
 app.get('/api/students/:id/results', async (req, res) => { try { const r = await pool.query('SELECT quizname as "quizName", score, subjectid as "subjectId", completedat as "completedAt" FROM quiz_results WHERE studentid = $1 ORDER BY completedat DESC', [req.params.id]); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 app.get('/api/students/:id/stats', async (req, res) => { try { const r = await pool.query('SELECT score FROM quiz_results WHERE studentId = $1', [req.params.id]); const rs = r.rows; if (!rs.length) return res.json({ totalQuizzes: 0, averageScore: 0, bestScore: 0 }); const avg = Math.round(rs.reduce((s, row) => s + row.score, 0) / rs.length); const best = Math.max(...rs.map(r => r.score)); res.json({ totalQuizzes: rs.length, averageScore: avg, bestScore: best }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 
-// 10. Messaging System
+// 10. Messaging System (Student Side)
 app.get('/api/students/:id/messages', async (req, res) => { try { const r = await pool.query('SELECT * FROM messages WHERE studentId = $1 ORDER BY createdAt DESC', [req.params.id]); const now = new Date(); const todayCount = r.rows.filter(m => new Date(m.createdat) >= new Date(now.setHours(0,0,0,0))).length; res.json({ messages: r.rows, remaining: Math.max(0, 3 - todayCount) }); } catch(e) { res.status(500).json([]); } });
 app.post('/api/messages', validateRequest(schemas.message), async (req, res) => { const { studentId, message } = req.body; try { const countQuery = await pool.query("SELECT COUNT(*) FROM messages WHERE studentId = $1 AND createdAt >= CURRENT_DATE", [studentId]); if (parseInt(countQuery.rows[0].count) >= 3) return res.status(429).json({ error: 'Limit reached', remaining: 0 }); await pool.query('INSERT INTO messages (studentId, content) VALUES ($1, $2)', [studentId, message]); res.json({ message: 'Sent', remaining: 3 - (parseInt(countQuery.rows[0].count) + 1) }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 
@@ -340,7 +340,7 @@ app.get('/api/quiz-status', async (req, res) => { try { const cached = await red
 // 12. File Upload (Admin Only)
 app.post('/api/admin/upload', authenticateAdmin, upload.single('file'), async (req, res) => { if (!req.file) return res.status(400).json({ error: 'No file' }); try { const result = await uploadToCloudinary(req.file.buffer); res.json({ message: 'Uploaded', url: result.secure_url }); } catch (e) { res.status(500).json({ error: 'Upload failed' }); } });
 
-// ================= ADMIN MANAGEMENT =================
+// ================= ADMIN MANAGEMENT (EXISTING & NEW) =================
 
 app.get('/api/admin/stats', authenticateAdmin, async (req, res) => { try { const s = await pool.query('SELECT COUNT(*) as t FROM students'); const q = await pool.query('SELECT COUNT(*) as t, AVG(score) as a FROM quiz_results'); res.json({ totalStudents: parseInt(s.rows[0].t), totalQuizzes: parseInt(q.rows[0].t), averageScore: Math.round(q.rows[0].a || 0) }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 app.get('/api/admin/students', authenticateAdmin, async (req, res) => { try { const r = await pool.query('SELECT * FROM students ORDER BY createdAt DESC'); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Error' }); } });
@@ -352,11 +352,112 @@ app.get('/api/admin/messages', authenticateAdmin, async (req, res) => { try { co
 app.post('/api/admin/messages/:id/reply', authenticateAdmin, async (req, res) => { try { await pool.query('UPDATE messages SET adminReply = $1 WHERE id = $2', [req.body.reply, req.params.id]); res.json({ message: 'Replied' }); } catch (e) { res.status(500).json({ error: 'Error' }); } });
 app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => { const client = await pool.connect(); try { await client.query('BEGIN'); const studentId = req.params.id; await client.query('DELETE FROM student_fingerprints WHERE studentId = $1', [studentId]); await client.query('DELETE FROM quiz_results WHERE studentId = $1', [studentId]); await client.query('DELETE FROM messages WHERE studentId = $1', [studentId]); await client.query('DELETE FROM login_logs WHERE studentId = $1', [studentId]); await client.query('DELETE FROM activity_logs WHERE studentId = $1', [studentId]); await client.query('DELETE FROM active_sessions WHERE studentId = $1', [studentId]); const result = await client.query('DELETE FROM students WHERE id = $1 RETURNING *', [studentId]); if (result.rowCount === 0) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Student not found' }); } await redisClient.del('public_stats'); await client.query('COMMIT'); res.json({ message: 'Deleted' }); } catch (e) { await client.query('ROLLBACK'); res.status(500).json({ error: 'Error' }); } finally { client.release(); } });
 
+// ================= NEW ADMIN FEATURES (Logs & Messaging) =================
+
+// 13. جلب سجلات النشاط (Activity Logs)
+app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                al.id,
+                al.activityType as "activityType",
+                al.subjectName as "subjectName",
+                al.score,
+                al.timestamp,
+                s.name as "studentName",
+                s.email as "studentEmail"
+            FROM activity_logs al
+            JOIN students s ON al.studentId = s.id
+            ORDER BY al.timestamp DESC
+            LIMIT 100
+        `);
+        
+        // تحويل التاريخ لصيغة مقروءة
+        const logs = result.rows.map(log => ({
+            ...log,
+            date: log.timestamp
+        }));
+        
+        res.json(logs);
+    } catch (e) {
+        console.error('❌ [Activity Logs Error]:', e);
+        res.status(500).json({ error: 'Failed to fetch activity logs' });
+    }
+});
+
+// 14. جلب سجلات النشاط لطالب محدد
+app.get('/api/students/:id/activity', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                activityType as "activitytype",
+                subjectName as "subjectname",
+                score,
+                timestamp
+            FROM activity_logs
+            WHERE studentId = $1
+            ORDER BY timestamp DESC
+            LIMIT 50
+        `, [req.params.id]);
+        
+        res.json(result.rows);
+    } catch (e) {
+        console.error('❌ [Student Activity Error]:', e);
+        res.status(500).json({ error: 'Failed to fetch student activity' });
+    }
+});
+
+// 15. جلب سجلات الدخول لطالب محدد
+app.get('/api/students/:id/logs', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                id,
+                loginTime as "logintime",
+                logoutTime as "logouttime"
+            FROM login_logs
+            WHERE studentId = $1
+            ORDER BY loginTime DESC
+            LIMIT 20
+        `, [req.params.id]);
+        
+        res.json(result.rows);
+    } catch (e) {
+        console.error('❌ [Student Logs Error]:', e);
+        res.status(500).json({ error: 'Failed to fetch login logs' });
+    }
+});
+
+// 16. حذف رسالة
+app.delete('/api/admin/messages/:id', authenticateAdmin, async (req, res) => {
+    try {
+        await pool.query('DELETE FROM messages WHERE id = $1', [req.params.id]);
+        res.json({ message: 'Message deleted successfully' });
+    } catch (e) {
+        console.error('❌ [Delete Message Error]:', e);
+        res.status(500).json({ error: 'Failed to delete message' });
+    }
+});
+
+// 17. تحديث حالة الرسالة (قراءة/غير مقروءة)
+app.patch('/api/admin/messages/:id/read', authenticateAdmin, async (req, res) => {
+    try {
+        await pool.query(
+            'UPDATE messages SET isRead = $1 WHERE id = $2',
+            [req.body.isRead, req.params.id]
+        );
+        res.json({ message: 'Message status updated' });
+    } catch (e) {
+        console.error('❌ [Update Message Error]:', e);
+        res.status(500).json({ error: 'Failed to update message' });
+    }
+});
+
 // ================= HEALTH & START =================
 
-app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '25.1.0', timestamp: new Date().toISOString() }));
+app.get('/api/health', (req, res) => res.json({ status: 'OK', version: '25.2.0', timestamp: new Date().toISOString() }));
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 25.1.0 - SendGrid Logic Updated`);
+    console.log(`✅ Version 25.2.0 - Fully Integrated`);
 });
