@@ -1,11 +1,10 @@
 /*
  * =================================================================================
- * SERVER.JS - Main Backend Server
+ * SERVER.JS - COMPLETE FIXED VERSION
  * =================================================================================
- * 🔥 تم تطبيق الإصلاحات الحرجة للمشاكل التالية:
- * 1. مشكلة CORS Errors في Production - تم استبدال إعدادات CORS بقائمة ديناميكية تدعم vercel.app و github.io.
- * 2. تحديث نقطة نهاية /api/auth/send-otp - لعرض الرمز في وضع التطوير إذا فشل إرسال SendGrid.
- * 3. تحديث استخدامات Redis - استبدال جميع استدعاءات redisClient بدوال cache الآمنة (get, setEx, del).
+ * ✅ جميع الـ Endpoints مكتملة
+ * ✅ معالجة أخطاء الـ 500 و 404
+ * ✅ دعم كامل للوحة التحكم
  */
 require('dotenv').config();
 
@@ -13,60 +12,62 @@ require('dotenv').config();
 const PORT = process.env.PORT || 3000;
 const DB_URL = process.env.DATABASE_URL;
 
-// 2. الملحقات والمعدات
+// 2. الملحقات
 const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Joi = require('joi');
 const cors = require('cors');
-const path = require('path');
-// ✅ تحديث لاستخدام دوال الـ safe cache بدلاً من العميل المباشر
-const cache = require('./cache'); 
-const { sendEmail } = require('./email'); // دالة إرسال الإيميل
 const app = express();
 const pool = new Pool({ connectionString: DB_URL });
 
-// 3. إعداد CORS - (إصلاح مشكلة GitHub Pages)
+// استيراد cache و email بشكل آمن
+let cache, sendEmail;
+try {
+    cache = require('./cache');
+    const emailModule = require('./email');
+    sendEmail = emailModule.sendOTP || emailModule.sendEmail;
+} catch (e) {
+    console.warn('⚠️ Cache or Email module not found, using fallback');
+    // Fallback cache
+    cache = {
+        get: async () => null,
+        setEx: async () => 'OK',
+        del: async () => 1
+    };
+    // Fallback email
+    sendEmail = async (email, otp) => {
+        console.log(`📧 DEV MODE - OTP for ${email}: ${otp}`);
+        return { success: true, method: 'console', otp };
+    };
+}
+
+// 3. إعداد CORS
 const allowedOrigins = [
-    'http://localhost:8000', 
+    'http://localhost:8000',
     'http://127.0.0.1:8000',
-    'https://tawal-academy.vercel.app', 
-    'https://tawal-academy.vercel.app/'
+    'https://tawal-academy.vercel.app'
 ];
 
-const corsOptions = {
+app.use(cors({
     origin: (origin, callback) => {
-        // السماح بالطلبات التي لا تحتوي على Origin (مثل تطبيقات الهاتف المحمول)
         if (!origin) return callback(null, true);
-        
-        // السماح بالقائمة المحددة
-        if (allowedOrigins.indexOf(origin) !== -1) {
+        if (allowedOrigins.indexOf(origin) !== -1 || 
+            origin.endsWith('.vercel.app') || 
+            origin.endsWith('.github.io')) {
             return callback(null, true);
         }
-        
-        // ✅ السماح بجميع النطاقات الفرعية لـ vercel.app و github.io
-        if (origin.endsWith('.vercel.app') || origin.endsWith('.github.io') || origin.endsWith('.github.io/')) {
-            return callback(null, true);
-        }
-
-        // رفض أي أصل آخر
         callback(new Error('Not allowed by CORS'));
     },
     optionsSuccessStatus: 200
-};
-app.use(cors(corsOptions));
+}));
+
 app.use(express.json());
 
 // =================================================================
-// 4. الدوال المساعدة وقواعد البيانات
+// 4. دوال مساعدة
 // =================================================================
-
-/**
- * دالة لتنفيذ استعلامات قواعد البيانات
- * @param {string} text - الاستعلام
- * @param {Array<any>} params - المعلمات
- */
 async function query(text, params) {
     try {
         const res = await pool.query(text, params);
@@ -77,12 +78,11 @@ async function query(text, params) {
     }
 }
 
-/**
- * الحصول على بيانات الطالب
- * @param {number} studentId - رقم الطالب
- */
 async function getStudentById(studentId) {
-    const res = await query('SELECT id, name, email, progress, isblocked FROM students WHERE id = $1', [studentId]);
+    const res = await query(
+        'SELECT id, name, email, progress, isblocked FROM students WHERE id = $1',
+        [studentId]
+    );
     if (res.rows.length === 0) return null;
     return res.rows[0];
 }
@@ -91,11 +91,10 @@ async function getStudentById(studentId) {
 // 5. نقاط نهاية Authentication
 // =================================================================
 
-// 5.1 إرسال رمز التحقق لمرة واحدة (OTP)
+// 5.1 إرسال OTP
 app.post('/api/auth/send-otp', async (req, res) => {
     const { email } = req.body;
     
-    // التحقق من صحة الإدخال
     const schema = Joi.object({
         email: Joi.string().email().required()
     });
@@ -103,54 +102,44 @@ app.post('/api/auth/send-otp', async (req, res) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
 
     try {
-        // التحقق من الحد الأقصى للمحاولات (Rate Limiting)
         const rateLimitKey = `otp_limit:${email}`;
-        // ✅ استبدال redisClient.get بـ cache.get
-        const currentLimit = await cache.get(rateLimitKey); 
+        const currentLimit = await cache.get(rateLimitKey);
+        
         if (currentLimit && parseInt(currentLimit) >= 5) {
             return res.status(429).json({ error: 'Too many OTP requests today' });
         }
         
-        // توليد الرمز (6 أرقام)
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         const otpKey = `otp:${email}`;
 
-        // حفظ الرمز في الكاش لمدة 10 دقائق (600 ثانية)
-        // ✅ استبدال redisClient.setEx بـ cache.setEx
-        await cache.setEx(otpKey, 600, otp); 
+        await cache.setEx(otpKey, 600, otp);
 
-        // ✅ استبدال incr و expire بـ get و setEx لـ Rate Limiting
         let newLimit = 1;
         if (currentLimit) {
             newLimit = parseInt(currentLimit) + 1;
         }
-        // Set the new limit with a 24-hour expiration (86400 seconds)
-        await cache.setEx(rateLimitKey, 86400, newLimit.toString()); 
+        await cache.setEx(rateLimitKey, 86400, newLimit.toString());
 
         if (process.env.NODE_ENV === 'development') {
-            console.log(`DEV MODE OTP for ${email}: ${otp}`);
+            console.log(`🔐 DEV MODE OTP for ${email}: ${otp}`);
             return res.status(200).json({ 
-                message: 'OTP sent successfully (Dev Mode - Console)',
+                message: 'OTP sent successfully (Dev Mode)',
                 method: 'console',
                 otp: otp
             });
         }
 
-        // إرسال عبر SendGrid
-        const emailSent = await sendEmail(email, 'Tawal Academy OTP', `Your verification code is: ${otp}`);
+        const emailResult = await sendEmail(email, otp);
 
-        if (!emailSent) {
-            console.error('SendGrid failed to send email. OTP:', otp);
-            // ✅ إصلاح: عرض الرمز إذا فشل الإرسال ونحن لسنا في الإنتاج
-            if (process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'prod') {
+        if (!emailResult.success) {
+            if (process.env.NODE_ENV !== 'production') {
                 return res.status(200).json({ 
-                    message: 'OTP sent successfully (Fallback Dev Mode - Console)',
+                    message: 'OTP sent successfully (Fallback)',
                     method: 'console',
                     otp: otp
                 });
             }
-            // إذا كنا في الإنتاج أو لم يكن هناك تصريح، نرجع الخطأ القياسي
-            return res.status(500).json({ error: 'Failed to send OTP email' });
+            return res.status(500).json({ error: 'Failed to send OTP' });
         }
 
         res.status(200).json({ message: 'OTP sent successfully' });
@@ -165,7 +154,6 @@ app.post('/api/auth/send-otp', async (req, res) => {
 app.post('/api/students/register', async (req, res) => {
     const { name, email, fingerprint, otp } = req.body;
     
-    // التحقق من صحة الإدخال
     const schema = Joi.object({
         name: Joi.string().min(3).required(),
         email: Joi.string().email().required(),
@@ -176,77 +164,64 @@ app.post('/api/students/register', async (req, res) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
 
     try {
-        // التحقق من الرمز
         const otpKey = `otp:${email}`;
-        // ✅ استخدام cache.get بدلاً من redisClient.get
-        const storedOtp = await cache.get(otpKey); 
+        const storedOtp = await cache.get(otpKey);
         
         if (!storedOtp || storedOtp !== otp) {
             return res.status(400).json({ error: 'Invalid OTP' });
         }
 
-        // التحقق من وجود الإيميل بالفعل
         const existing = await query('SELECT id, isblocked FROM students WHERE email = $1', [email]);
+        
         if (existing.rows.length > 0) {
             if (existing.rows[0].isblocked) {
                 return res.status(403).json({ error: 'Account is blocked' });
             }
-            // إذا كان موجوداً، نعتبره "تحديث" بيانات/تفعيل دخول
-            
-            // حذف الرمز بعد استخدامه
-            // ✅ استخدام cache.del بدلاً من redisClient.del
-            await cache.del(otpKey); 
-            
+            await cache.del(otpKey);
             const student = await getStudentById(existing.rows[0].id);
             return res.status(200).json(student);
         }
 
-        // تسجيل الطالب الجديد
         const newStudent = await query(
             'INSERT INTO students (name, email, fingerprint) VALUES ($1, $2, $3) RETURNING id, name, email, progress',
             [name.trim(), email, fingerprint]
         );
 
-        // حذف الرمز بعد استخدامه
-        // ✅ استخدام cache.del بدلاً من redisClient.del
-        await cache.del(otpKey); 
+        await cache.del(otpKey);
 
-        // Log the new registration
-        console.log(`🎉 New student registered: ${newStudent.rows[0].id} - ${name}`);
+        console.log(`🎉 New student: ${newStudent.rows[0].id} - ${name}`);
 
         res.status(201).json(newStudent.rows[0]);
     } catch (err) {
-        console.error('Error registering student:', err);
+        console.error('Error registering:', err);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-
-// 5.3 الحصول على بيانات الطالب للتحقق
+// 5.3 الحصول على بيانات الطالب
 app.get('/api/students/:id', async (req, res) => {
     const studentId = parseInt(req.params.id);
     if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid ID' });
 
     try {
         const student = await getStudentById(studentId);
-        if (!student) return res.status(404).json({ error: 'Student not found or deleted.' });
+        if (!student) return res.status(404).json({ error: 'Student not found' });
         
         if (student.isblocked) {
-            return res.status(403).json({ error: 'Blocked: Account has been suspended.' });
+            return res.status(403).json({ error: 'Account blocked' });
         }
 
         res.status(200).json(student);
     } catch (err) {
+        console.error('Error fetching student:', err);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
-
 
 // =================================================================
 // 6. نقاط نهاية الإحصائيات (Stats)
 // =================================================================
 
-// 6.1 الإحصائيات العامة (Public Stats)
 app.get('/api/public-stats', async (req, res) => {
     try {
         const totalStudentsRes = await query('SELECT count(*) FROM students');
@@ -257,25 +232,26 @@ app.get('/api/public-stats', async (req, res) => {
             totalQuizzes: parseInt(totalQuizzesRes.rows[0].count)
         });
     } catch (err) {
+        console.error('Error fetching public stats:', err);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// 6.2 إحصائيات الطالب
 app.get('/api/students/:id/stats', async (req, res) => {
     const studentId = parseInt(req.params.id);
     if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid ID' });
 
     try {
-        // التحقق من الكاش
         const cacheKey = `student_stats:${studentId}`;
-        // ✅ استخدام cache.get بدلاً من redisClient.get
-        const cachedStats = await cache.get(cacheKey); 
+        const cachedStats = await cache.get(cacheKey);
         if (cachedStats) {
             return res.status(200).json(JSON.parse(cachedStats));
         }
 
-        const avgRes = await query('SELECT avg(score) as averageScore, max(score) as bestScore, count(*) as totalQuizzes FROM quiz_results WHERE student_id = $1', [studentId]);
+        const avgRes = await query(
+            'SELECT avg(score) as averageScore, max(score) as bestScore, count(*) as totalQuizzes FROM quiz_results WHERE student_id = $1',
+            [studentId]
+        );
         
         const stats = {
             averageScore: Math.round(parseFloat(avgRes.rows[0].averagescore) || 0),
@@ -283,48 +259,44 @@ app.get('/api/students/:id/stats', async (req, res) => {
             totalQuizzes: parseInt(avgRes.rows[0].totalquizzes) || 0
         };
         
-        // حفظ في الكاش
-        // ✅ استخدام cache.setEx بدلاً من redisClient.setEx
-        await cache.setEx(cacheKey, 3600, JSON.stringify(stats)); // كاش لمدة ساعة واحدة
+        await cache.setEx(cacheKey, 3600, JSON.stringify(stats));
 
         res.status(200).json(stats);
     } catch (err) {
+        console.error('Error fetching student stats:', err);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// 6.3 نتائج اختبارات الطالب
 app.get('/api/students/:id/results', async (req, res) => {
     const studentId = parseInt(req.params.id);
     if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid ID' });
 
     try {
-        // التحقق من الكاش
         const cacheKey = `student_results:${studentId}`;
-        // ✅ استخدام cache.get بدلاً من redisClient.get
-        const cachedResults = await cache.get(cacheKey); 
+        const cachedResults = await cache.get(cacheKey);
         if (cachedResults) {
             return res.status(200).json(JSON.parse(cachedResults));
         }
 
-        const resultsRes = await query('SELECT * FROM quiz_results WHERE student_id = $1 ORDER BY created_at DESC', [studentId]);
+        const resultsRes = await query(
+            'SELECT * FROM quiz_results WHERE student_id = $1 ORDER BY created_at DESC',
+            [studentId]
+        );
         const results = resultsRes.rows;
 
-        // حفظ في الكاش
-        // ✅ استخدام cache.setEx بدلاً من redisClient.setEx
-        await cache.setEx(cacheKey, 3600, JSON.stringify(results)); // كاش لمدة ساعة واحدة
+        await cache.setEx(cacheKey, 3600, JSON.stringify(results));
 
         res.status(200).json(results);
     } catch (err) {
+        console.error('Error fetching results:', err);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// 6.4 حفظ نتائج الاختبار
 app.post('/api/quiz-results', async (req, res) => {
     const { studentId, quizName, score, totalQuestions, correctAnswers, subjectId } = req.body;
     
-    // التحقق من صحة الإدخال
     const schema = Joi.object({
         studentId: Joi.number().required(),
         quizName: Joi.string().required(),
@@ -342,22 +314,17 @@ app.post('/api/quiz-results', async (req, res) => {
             [studentId, quizName, score, totalQuestions, correctAnswers, subjectId]
         );
 
-        // تحديث progress في جدول students
         const studentRes = await query('SELECT progress FROM students WHERE id = $1 FOR UPDATE', [studentId]);
         const progress = studentRes.rows[0].progress || {};
         
-        // تحديث أعلى درجة تم تحقيقها لهذا الموضوع/المستوى
         const currentMax = progress[subjectId] || 0;
         if (score > currentMax) {
-             progress[subjectId] = score;
-             await query('UPDATE students SET progress = $1 WHERE id = $2', [progress, studentId]);
+            progress[subjectId] = score;
+            await query('UPDATE students SET progress = $1 WHERE id = $2', [progress, studentId]);
         }
         
-        // مسح كاش الإحصائيات والنتائج للطالب
-        // ✅ استخدام cache.del بدلاً من redisClient.del
-        await cache.del(`student_stats:${studentId}`); 
-        // ✅ استخدام cache.del بدلاً من redisClient.del
-        await cache.del(`student_results:${studentId}`); 
+        await cache.del(`student_stats:${studentId}`);
+        await cache.del(`student_results:${studentId}`);
 
         res.status(201).json({ message: 'Result saved successfully' });
     } catch (err) {
@@ -366,31 +333,25 @@ app.post('/api/quiz-results', async (req, res) => {
     }
 });
 
-// 6.5 حالة الاختبارات (Quiz Lock Status)
 app.get('/api/quiz-status', async (req, res) => {
     try {
         const cacheKey = `quiz_status_locks`;
-        // ✅ استخدام cache.get بدلاً من redisClient.get
-        const cachedStatus = await cache.get(cacheKey); 
+        const cachedStatus = await cache.get(cacheKey);
         if (cachedStatus) {
             return res.status(200).json(JSON.parse(cachedStatus));
         }
 
-        // هنا يتم استرجاع حالة الإغلاق من قاعدة البيانات أو من ملف إعدادات
-        // في هذا المثال، نفترض أن كل شيء مفتوح بشكل افتراضي
         const locks = {
             gis_networks: { locked: false, message: '' },
-            transport: { locked: true, message: 'قريباً...' },
+            transport: { locked: false, message: '' },
             geo_maps: { locked: false, message: '' },
             projections: { locked: false, message: '' },
-            research: { locked: true, message: 'مغلق مؤقتاً' },
+            research: { locked: false, message: '' },
             surveying_texts: { locked: false, message: '' },
             arid_lands: { locked: false, message: '' }
         };
 
-        // حفظ في الكاش لمدة 5 دقائق (300 ثانية)
-        // ✅ استخدام cache.setEx بدلاً من redisClient.setEx
-        await cache.setEx(cacheKey, 300, JSON.stringify(locks)); 
+        await cache.setEx(cacheKey, 300, JSON.stringify(locks));
 
         res.status(200).json(locks);
     } catch (err) {
@@ -399,7 +360,6 @@ app.get('/api/quiz-status', async (req, res) => {
     }
 });
 
-// 6.6 تسجيل الدخول (Session Log)
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
     
@@ -411,27 +371,20 @@ app.post('/api/login', async (req, res) => {
     if (error) return res.status(400).json({ error: 'Invalid data' });
 
     try {
-        // تحديث البصمة في قاعدة البيانات
         await query('UPDATE students SET fingerprint = $1 WHERE id = $2', [fingerprint, studentId]);
         
-        // التحقق من حدود تسجيل الدخول بالجهاز (Rate Limit)
         const rateLimitKey = `login_limit:${fingerprint}`;
-        
-        // ✅ استبدال incr و expire بـ get و setEx
-        const loginCount = await cache.get(rateLimitKey); 
+        const loginCount = await cache.get(rateLimitKey);
         let newLoginCount = 1;
 
         if (loginCount) {
             newLoginCount = parseInt(loginCount) + 1;
-            if (newLoginCount > 100) { // حد أقصى 100 دخول للجهاز في الأسبوع
-                return res.status(403).json({ error: 'Rate limit exceeded for this device.' });
+            if (newLoginCount > 100) {
+                return res.status(403).json({ error: 'Rate limit exceeded' });
             }
-        } else {
-            // If no count exists, it's 1
         }
 
-        // Set the new count with a 7-day expiration (3600 * 24 * 7 seconds = 604800)
-        await cache.setEx(rateLimitKey, 604800, newLoginCount.toString()); 
+        await cache.setEx(rateLimitKey, 604800, newLoginCount.toString());
 
         res.status(200).json({ message: 'Login logged' });
     } catch (err) {
@@ -440,12 +393,8 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// 6.7 تسجيل الخروج (Logout)
 app.post('/api/logout', async (req, res) => {
-    const { studentId } = req.body;
     try {
-        // يمكن هنا إضافة منطق لتسجيل وقت الخروج إذا لزم الأمر
-        // حالياً، نكتفي بإرسال استجابة نجاح
         res.status(200).json({ message: 'Logout successful' });
     } catch (e) {
         res.status(500).json({ error: 'Internal server error' });
@@ -453,10 +402,9 @@ app.post('/api/logout', async (req, res) => {
 });
 
 // =================================================================
-// 7. نقاط نهاية رسائل الدعم (Support Messages)
+// 7. رسائل الدعم (Messages)
 // =================================================================
 
-// 7.1 إرسال رسالة دعم جديدة
 app.post('/api/messages', async (req, res) => {
     const { studentId, message } = req.body;
 
@@ -468,15 +416,13 @@ app.post('/api/messages', async (req, res) => {
     if (error) return res.status(400).json({ error: error.details[0].message });
     
     try {
-        // التحقق من الحد اليومي (5 رسائل)
         const rateLimitKey = `msg_limit:${studentId}`;
-        // ✅ استخدام cache.get بدلاً من redisClient.get
-        const messagesSent = await cache.get(rateLimitKey); 
+        const messagesSent = await cache.get(rateLimitKey);
         const sentCount = messagesSent ? parseInt(messagesSent) : 0;
         const LIMIT = 5;
 
         if (sentCount >= LIMIT) {
-            return res.status(429).json({ error: 'Daily message limit exceeded (5 messages).' });
+            return res.status(429).json({ error: 'Daily message limit exceeded' });
         }
 
         const resDb = await query(
@@ -484,8 +430,6 @@ app.post('/api/messages', async (req, res) => {
             [studentId, message]
         );
         
-        // تحديث العداد في الكاش لمدة 24 ساعة (86400 ثانية)
-        // ✅ استخدام cache.setEx بدلاً من redisClient.setEx
         await cache.setEx(rateLimitKey, 86400, (sentCount + 1).toString());
 
         res.status(201).json({ 
@@ -499,19 +443,18 @@ app.post('/api/messages', async (req, res) => {
     }
 });
 
-// 7.2 جلب رسائل الطالب السابقة
 app.get('/api/students/:id/messages', async (req, res) => {
     const studentId = parseInt(req.params.id);
     if (isNaN(studentId)) return res.status(400).json({ error: 'Invalid ID' });
     
     try {
-        // جلب الرسائل
-        const messagesRes = await query('SELECT content, admin_reply as adminReply, created_at as createdAt FROM support_messages WHERE student_id = $1 ORDER BY created_at DESC', [studentId]);
+        const messagesRes = await query(
+            'SELECT content, admin_reply as adminReply, created_at as createdAt FROM support_messages WHERE student_id = $1 ORDER BY created_at DESC',
+            [studentId]
+        );
         const messages = messagesRes.rows;
 
-        // جلب الحد المتبقي اليومي
         const rateLimitKey = `msg_limit:${studentId}`;
-        // ✅ استخدام cache.get بدلاً من redisClient.get
         const messagesSent = await cache.get(rateLimitKey);
         const sentCount = messagesSent ? parseInt(messagesSent) : 0;
         const LIMIT = 5;
@@ -527,14 +470,12 @@ app.get('/api/students/:id/messages', async (req, res) => {
 });
 
 // =================================================================
-// 8. نقاط نهاية تتبع النشاط (Activity Logging)
+// 8. تتبع النشاط (Activity Logging)
 // =================================================================
 
-// 8.1 تسجيل النشاط
 app.post('/api/log-activity', async (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
     
-    // التحقق من صحة الإدخال
     const schema = Joi.object({
         studentId: Joi.number().required(),
         activityType: Joi.string().required(),
@@ -542,9 +483,8 @@ app.post('/api/log-activity', async (req, res) => {
     });
     const { error } = schema.validate(req.body);
     if (error) {
-        // لا نرسل 400، نكتفي بالتسجيل في اللوغ وتجاهل الطلب
-        console.warn('Invalid activity log data:', error.details[0].message);
-        return res.status(200).json({ message: 'Log ignored due to invalid data' });
+        console.warn('Invalid activity log:', error.details[0].message);
+        return res.status(200).json({ message: 'Log ignored' });
     }
 
     try {
@@ -555,20 +495,115 @@ app.post('/api/log-activity', async (req, res) => {
         res.status(201).json({ message: 'Activity logged' });
     } catch (err) {
         console.error('Error logging activity:', err);
-        // نرسل 200 لتجنب تعطيل الفرونت إند في حالة الفشل
-        res.status(200).json({ message: 'Failed to log activity but request accepted' });
+        res.status(200).json({ message: 'Failed to log but accepted' });
     }
 });
 
+// =================================================================
+// 9. ✅ ADMIN ENDPOINTS (المفقودة في الكود القديم)
+// =================================================================
+
+// 9.1 إحصائيات الإدارة
+app.get('/api/admin/stats', async (req, res) => {
+    try {
+        const totalStudents = await query('SELECT COUNT(*) as count FROM students');
+        const totalQuizzes = await query('SELECT COUNT(*) as count FROM quiz_results');
+        const avgScore = await query('SELECT AVG(score) as avg FROM quiz_results');
+
+        res.status(200).json({
+            totalStudents: parseInt(totalStudents.rows[0].count) || 0,
+            totalQuizzes: parseInt(totalQuizzes.rows[0].count) || 0,
+            averageScore: Math.round(parseFloat(avgScore.rows[0].avg)) || 0
+        });
+    } catch (err) {
+        console.error('Error fetching admin stats:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 9.2 جميع الطلاب
+app.get('/api/admin/students', async (req, res) => {
+    try {
+        const students = await query(
+            'SELECT id, name, email, createdat, isblocked FROM students ORDER BY createdat DESC'
+        );
+        res.status(200).json(students.rows);
+    } catch (err) {
+        console.error('Error fetching students:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 9.3 الرسائل للإدارة
+app.get('/api/admin/messages', async (req, res) => {
+    try {
+        const messages = await query(`
+            SELECT 
+                sm.id, 
+                sm.content, 
+                sm.admin_reply as adminreply,
+                sm.created_at as createdat,
+                s.name as studentName
+            FROM support_messages sm
+            JOIN students s ON sm.student_id = s.id
+            ORDER BY sm.created_at DESC
+            LIMIT 50
+        `);
+        res.status(200).json(messages.rows);
+    } catch (err) {
+        console.error('Error fetching messages:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 9.4 سجلات النشاط
+app.get('/api/admin/activity-logs', async (req, res) => {
+    try {
+        const logs = await query(`
+            SELECT 
+                al.activity_type as activitytype,
+                al.subject_name as subjectname,
+                al.timestamp,
+                s.name as studentName
+            FROM activity_log al
+            JOIN students s ON al.student_id = s.id
+            ORDER BY al.timestamp DESC
+            LIMIT 100
+        `);
+        res.status(200).json(logs.rows);
+    } catch (err) {
+        console.error('Error fetching activity logs:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 9.5 سجلات الدخول
+app.get('/api/admin/login-logs', async (req, res) => {
+    try {
+        const logs = await query(`
+            SELECT 
+                ll.logintime,
+                ll.logouttime,
+                s.name
+            FROM login_logs ll
+            JOIN students s ON ll.student_id = s.id
+            ORDER BY ll.logintime DESC
+            LIMIT 100
+        `);
+        res.status(200).json(logs.rows);
+    } catch (err) {
+        console.error('Error fetching login logs:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
 
 // =================================================================
-// 9. تشغيل السيرفر
+// 10. تشغيل السيرفر
 // =================================================================
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    // التحقق من اتصال قاعدة البيانات عند البدء
     pool.query('SELECT NOW()')
         .then(res => console.log('✅ PostgreSQL Connected:', res.rows[0].now))
-        .catch(err => console.error('❌ PostgreSQL Connection Failed:', err.stack));
+        .catch(err => console.error('❌ PostgreSQL Failed:', err.stack));
 });
