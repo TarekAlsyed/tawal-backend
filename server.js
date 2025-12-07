@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 21.2.0 (MAX SECURITY: DB Split + HPP + XSS + Joi Validation)
+ * SERVER.JS - Version 22.0.0 (High Performance: Redis Caching Enabled)
  * =================================================================================
  */
 
@@ -17,6 +17,7 @@ const hpp = require('hpp'); // 🔥 Security: Prevent HTTP Parameter Pollution
 const xss = require('xss'); // 🔥 Security: XSS Sanitizer
 const { pool, initializeDatabase } = require('./database'); // 🔥 Database Module
 const { validateRequest, schemas } = require('./validation'); // 🔥 Validation Module
+const redisClient = require('./cache'); // 🔥 Redis Cache Module (NEW)
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -93,23 +94,36 @@ function authenticateAdmin(req, res, next) {
 
 // ================= API ENDPOINTS =================
 
-// Public Stats (For Homepage)
+// 🔥 Public Stats (CACHED with Redis)
 app.get('/api/public-stats', async (req, res) => {
     try {
+        // 1. Check Redis Cache
+        const cachedData = await redisClient.get('public_stats');
+        if (cachedData) {
+            // If found in cache, return it immediately (Ultra Fast ⚡)
+            return res.json(JSON.parse(cachedData));
+        }
+
+        // 2. If not in cache, Query Database (Slower)
         const s = await pool.query('SELECT COUNT(*) as t FROM students');
         const q = await pool.query('SELECT COUNT(*) as t FROM quiz_results');
         
-        res.json({
+        const data = {
             totalStudents: parseInt(s.rows[0].t),
             totalQuizzes: parseInt(q.rows[0].t)
-        });
+        };
+
+        // 3. Save to Redis for 10 minutes (600 seconds)
+        await redisClient.setEx('public_stats', 600, JSON.stringify(data));
+
+        res.json(data);
     } catch (e) {
         console.error('Stats Error:', e);
         res.json({ totalStudents: 0, totalQuizzes: 0 });
     }
 });
 
-// 🔥 Admin Login (Secured with Validation)
+// Admin Login (Secured with Validation)
 app.post('/api/admin/login', validateRequest(schemas.adminLogin), async (req, res) => {
     const { username, password } = req.body;
     const userToFind = username || 'admin'; 
@@ -143,7 +157,6 @@ app.post('/api/admin/login', validateRequest(schemas.adminLogin), async (req, re
 // Fingerprint Verification (Secured with Validation)
 app.post('/api/verify-fingerprint', validateRequest(schemas.fingerprintCheck), async (req, res) => {
     const { fingerprint } = req.body;
-    // Note: Validation middleware already checked if fingerprint exists
     try {
         const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
         if (blocked.rows.length > 0) return res.status(403).json({ ok: false, message: 'Device Blocked' });
@@ -156,7 +169,6 @@ app.post('/api/verify-fingerprint', validateRequest(schemas.fingerprintCheck), a
 // Student Registration (Secured with Validation)
 app.post('/api/students/register', validateRequest(schemas.studentRegister), async (req, res) => {
     const { name, email, fingerprint } = req.body;
-    // Note: Joi Validation middleware already checked name length and email format
 
     if (fingerprint) {
         const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
@@ -167,6 +179,9 @@ app.post('/api/students/register', validateRequest(schemas.studentRegister), asy
         const result = await pool.query('INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *', [name, email]);
         const newStudent = result.rows[0];
         
+        // Invalidate public stats cache so the counter updates eventually
+        await redisClient.del('public_stats');
+
         if (fingerprint) {
             await pool.query('INSERT INTO student_fingerprints (studentId, fingerprint) VALUES ($1, $2)', [newStudent.id, fingerprint]);
         }
@@ -288,14 +303,15 @@ app.post('/api/log-activity', validateRequest(schemas.activityLog), async (req, 
 app.post('/api/quiz-results', validateRequest(schemas.quizResult), async (req, res) => {
     const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
     
-    // Note: Joi Validation already checked for missing fields and negative numbers
-
     try { 
         await pool.query(`
             INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) 
             VALUES ($1, $2, $3, $4, $5, $6)
         `, [studentId, quizName, subjectId || 'unknown', score, totalQuestions || 0, correctAnswers || 0]);
         
+        // Invalidate public stats cache so the total quizzes counter updates
+        await redisClient.del('public_stats');
+
         try {
             await pool.query(`
                 INSERT INTO activity_logs (studentId, activityType, subjectName, score, timestamp) 
@@ -406,12 +422,21 @@ app.get('/api/students/:id/logs', async (req, res) => {
     }
 });
 
-// Quiz Status
+// 🔥 Quiz Status (CACHED with Redis)
 app.get('/api/quiz-status', async (req, res) => { 
-    try { 
+    try {
+        // 1. Check Cache
+        const cached = await redisClient.get('quiz_status');
+        if (cached) return res.json(JSON.parse(cached));
+
+        // 2. DB Query
         const r = await pool.query('SELECT * FROM quiz_status'); 
         const map = {}; 
         r.rows.forEach(row => map[row.subjectid] = { locked: row.locked, message: row.message }); 
+        
+        // 3. Save to Cache (1 Minute only - to allow updates)
+        await redisClient.setEx('quiz_status', 60, JSON.stringify(map));
+
         res.json(map); 
     } catch (e) { 
         res.json({}); 
@@ -534,7 +559,7 @@ app.post('/api/admin/students/:id/unblock-fingerprint', authenticateAdmin, async
     } 
 });
 
-// Quiz Lock Management
+// 🔥 Quiz Lock Management (Updates Cache)
 app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res) => { 
     try { 
         await pool.query(`
@@ -543,6 +568,10 @@ app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res
             ON CONFLICT (subjectId) 
             DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP
         `, [req.params.subjectId, req.body.locked, req.body.message]); 
+        
+        // 🔥 Invalidate Cache (Force refresh on next request)
+        await redisClient.del('quiz_status');
+
         res.json({ message: 'Updated' }); 
     } catch (e) { 
         res.status(500).json({ error: 'Error' }); 
@@ -582,6 +611,10 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
             await client.query('ROLLBACK'); 
             return res.status(404).json({ error: 'Student not found' }); 
         }
+        
+        // Invalidate public stats cache (Count changed)
+        await redisClient.del('public_stats');
+
         await client.query('COMMIT');
         res.json({ message: 'Deleted' });
     } catch (e) {
@@ -595,13 +628,14 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '21.2.0', 
+    version: '22.0.0', 
     security: 'FULL ARMORED (DB Split + HPP + XSS + Joi) ✅',
+    performance: 'REDIS CACHING ENABLED 🚀',
     timestamp: new Date().toISOString()
 }));
 
 // Start Server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 21.2.0 - All Security Systems Operational!`);
+    console.log(`✅ Version 22.0.0 - High Performance Mode (Redis) ACTIVATED!`);
 });
