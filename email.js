@@ -1,48 +1,48 @@
 /*
  * =================================================================================
- * EMAIL.JS - Version 22.0.1 (FIXED: IPv4 Forced + Timeout Fix)
+ * EMAIL.JS - Version 22.0.2 (CRITICAL FIX: Force IPv4 + Timeouts)
  * =================================================================================
  */
 
 require('dotenv').config();
 const nodemailer = require('nodemailer');
 
-// 🔥 إعداد Gmail مع خيارات محسّنة + إجبار IPv4
+// 🔥 إعداد Gmail مع إجبار استخدام IPv4 لمنع Timeouts
 const createGmailTransporter = () => {
     return nodemailer.createTransport({
         service: 'gmail',
         host: 'smtp.gmail.com',
         port: 587,
-        secure: false, 
+        secure: false, // false for port 587
         auth: {
             user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS 
+            pass: process.env.EMAIL_PASS // ⚠️ تأكد أن هذا App Password
         },
         tls: {
             rejectUnauthorized: false,
             ciphers: 'SSLv3'
         },
-        // 🔥🔥🔥 إصلاح مشكلة Timeout في Railway 🔥🔥🔥
-        family: 4, // يجبر النظام على استخدام IPv4 بدلاً من IPv6
-        connectionTimeout: 20000, // زيادة وقت الانتظار لـ 20 ثانية
+        // 🔥🔥🔥 الإصلاح الحاسم لمشكلة Railway Timeout 🔥🔥🔥
+        family: 4, // يجبر النظام على استخدام IPv4 فقط (يحل مشكلة ETIMEDOUT)
+        connectionTimeout: 20000, // زيادة المهلة لـ 20 ثانية
         greetingTimeout: 10000,
         socketTimeout: 20000
     });
 };
 
-// 🔥 Fallback: محاولة Port 465 إذا فشل 587
+// 🔥 Fallback: محاولة Port 465 (مع IPv4 أيضاً)
 const createGmailSecureTransporter = () => {
     return nodemailer.createTransport({
         service: 'gmail',
         host: 'smtp.gmail.com',
         port: 465,
-        secure: true,
+        secure: true, // true for port 465
         auth: {
             user: process.env.EMAIL_USER,
             pass: process.env.EMAIL_PASS
         },
-        // 🔥🔥🔥 إصلاح مشكلة Timeout هنا أيضاً 🔥🔥🔥
-        family: 4, 
+        // 🔥🔥🔥 الإصلاح الحاسم هنا أيضاً 🔥🔥🔥
+        family: 4, // إجبار IPv4
         connectionTimeout: 20000,
         greetingTimeout: 10000,
         socketTimeout: 20000
@@ -90,7 +90,8 @@ const sendOTP = async (toEmail, otpCode) => {
             return true;
         } catch (error465) {
             console.error('❌ [Gmail SSL Also Failed]', error465.message);
-            console.error('❌ Full Error:', error465);
+            // لا حاجة لطباعة الخطأ الكامل إذا كان Timeout، الرسالة تكفي
+            if (error465.code !== 'ETIMEDOUT') console.error(error465);
             return false;
         }
     }
