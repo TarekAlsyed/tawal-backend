@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 21.0.0 (Enhanced Security & Modular DB)
+ * SERVER.JS - Version 21.1.0 (Security Enabled: HPP & XSS Sanitization)
  * =================================================================================
  */
 
@@ -13,7 +13,9 @@ const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const compression = require('compression'); 
-const { pool, initializeDatabase } = require('./database'); // 🔥 Import Database Module
+const hpp = require('hpp'); // 🔥 Security: Prevent HTTP Parameter Pollution
+const xss = require('xss'); // 🔥 Security: XSS Sanitizer
+const { pool, initializeDatabase } = require('./database'); 
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -37,24 +39,42 @@ app.options('*', cors());
 app.use(bodyParser.json({ limit: '50kb' })); 
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Rate Limiting (Optimized as per report)
+// 🔥 DATA SECURITY ACTIVATION 🔥
+
+// 1. Prevent HTTP Parameter Pollution
+app.use(hpp());
+
+// 2. Data Sanitization against XSS (Cross-Site Scripting)
+app.use((req, res, next) => {
+    if (req.body) {
+        Object.keys(req.body).forEach(key => {
+            if (typeof req.body[key] === 'string') {
+                // Clean any malicious scripts from input strings
+                req.body[key] = xss(req.body[key]);
+            }
+        });
+    }
+    next();
+});
+
+// Rate Limiting
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
-    max: 1000, // Reduced from 3000 for better security
+    max: 1000, 
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
 const loginLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 20, // Strict limit for logins
+    windowMs: 60 * 60 * 1000, 
+    max: 20, 
     message: { error: 'Too many login attempts, please try again later.' }
 });
 
 app.use('/api/', generalLimiter);
-app.use('/api/admin/login', loginLimiter); // Apply strict limit to admin login
+app.use('/api/admin/login', loginLimiter); 
 
-// Initialize Database (Tables are now managed in database.js)
+// Initialize Database
 initializeDatabase();
 
 // Admin Authentication Middleware
@@ -64,7 +84,6 @@ function authenticateAdmin(req, res, next) {
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) return res.status(403).json({ error: 'Forbidden' });
-        // Check for role in token
         if (user.role !== 'admin' && user.role !== 'superadmin') return res.status(403).json({ error: 'Admin only' });
         req.user = user;
         next();
@@ -89,10 +108,9 @@ app.get('/api/public-stats', async (req, res) => {
     }
 });
 
-// 🔥 Updated Admin Login (Uses Database Now)
+// Admin Login
 app.post('/api/admin/login', async (req, res) => {
     const { username, password } = req.body;
-    // Fallback for old frontend that might only send password (defaults to 'admin')
     const userToFind = username || 'admin'; 
 
     try {
@@ -203,7 +221,7 @@ app.get('/api/students/:id/messages', async (req, res) => {
     }
 });
 
-// Login Tracking (Updated for Active Sessions in future)
+// Login Tracking
 app.post('/api/login', async (req, res) => {
     const { studentId, fingerprint } = req.body;
     
@@ -221,8 +239,6 @@ app.post('/api/login', async (req, res) => {
         }
         
         await pool.query('INSERT INTO login_logs (studentId) VALUES ($1)', [studentId]);
-        
-        // Future: Insert into active_sessions here
         
         res.json({ success: true });
     } catch (e) { 
@@ -566,7 +582,7 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
         await client.query('DELETE FROM messages WHERE studentId = $1', [studentId]);
         await client.query('DELETE FROM login_logs WHERE studentId = $1', [studentId]);
         await client.query('DELETE FROM activity_logs WHERE studentId = $1', [studentId]);
-        await client.query('DELETE FROM active_sessions WHERE studentId = $1', [studentId]); // 🔥 Delete sessions too
+        await client.query('DELETE FROM active_sessions WHERE studentId = $1', [studentId]); 
         const result = await client.query('DELETE FROM students WHERE id = $1 RETURNING *', [studentId]);
         if (result.rowCount === 0) { 
             await client.query('ROLLBACK'); 
@@ -585,13 +601,13 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '21.0.0', 
-    security: 'ENHANCED (DB SPLIT) ✅',
+    version: '21.1.0', 
+    security: 'MAXIMUM (DB SPLIT + HPP + XSS) ✅',
     timestamp: new Date().toISOString()
 }));
 
 // Start Server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 21.0.0 - Database Modularized & Secured`);
+    console.log(`✅ Version 21.1.0 - Security Shields (HPP & XSS) ACTIVATED!`);
 });
