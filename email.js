@@ -1,30 +1,32 @@
 /*
  * =================================================================================
- * EMAIL.JS - Version 22.0.0 (FIXED: Gmail with Multiple Fallbacks)
+ * EMAIL.JS - Version 22.0.1 (FIXED: IPv4 Forced + Timeout Fix)
  * =================================================================================
  */
 
 require('dotenv').config();
 const nodemailer = require('nodemailer');
 
-// 🔥 إعداد Gmail مع خيارات محسّنة
+// 🔥 إعداد Gmail مع خيارات محسّنة + إجبار IPv4
 const createGmailTransporter = () => {
     return nodemailer.createTransport({
         service: 'gmail',
-        host: 'smtp.gmail.com', // صريح
-        port: 587, // TLS
-        secure: false, // false for port 587
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false, 
         auth: {
             user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS // ⚠️ يجب أن يكون App Password
+            pass: process.env.EMAIL_PASS 
         },
         tls: {
-            rejectUnauthorized: false, // للسماح بشهادات Self-signed
+            rejectUnauthorized: false,
             ciphers: 'SSLv3'
         },
-        connectionTimeout: 10000, // 10 ثواني
-        greetingTimeout: 5000,
-        socketTimeout: 15000
+        // 🔥🔥🔥 إصلاح مشكلة Timeout في Railway 🔥🔥🔥
+        family: 4, // يجبر النظام على استخدام IPv4 بدلاً من IPv6
+        connectionTimeout: 20000, // زيادة وقت الانتظار لـ 20 ثانية
+        greetingTimeout: 10000,
+        socketTimeout: 20000
     });
 };
 
@@ -33,13 +35,17 @@ const createGmailSecureTransporter = () => {
     return nodemailer.createTransport({
         service: 'gmail',
         host: 'smtp.gmail.com',
-        port: 465, // SSL
-        secure: true, // true for 465
+        port: 465,
+        secure: true,
         auth: {
             user: process.env.EMAIL_USER,
             pass: process.env.EMAIL_PASS
         },
-        connectionTimeout: 10000
+        // 🔥🔥🔥 إصلاح مشكلة Timeout هنا أيضاً 🔥🔥🔥
+        family: 4, 
+        connectionTimeout: 20000,
+        greetingTimeout: 10000,
+        socketTimeout: 20000
     });
 };
 
@@ -91,26 +97,3 @@ const sendOTP = async (toEmail, otpCode) => {
 };
 
 module.exports = { sendOTP };
-
-/*
- * =================================================================================
- * 📝 خطوات إصلاح Gmail:
- * =================================================================================
- * * ⚠️ المشكلة الأساسية: Gmail يحظر "Less Secure Apps" منذ 2022
- * * ✅ الحل الوحيد: استخدام "App Password"
- * * خطوات الحصول على App Password:
- * * 1. اذهب إلى: https://myaccount.google.com/
- * 2. اختر "Security" من القائمة اليسرى
- * 3. فعّل "2-Step Verification" (إذا لم يكن مفعلاً)
- * 4. بعد التفعيل، ارجع إلى "Security"
- * 5. ابحث عن "App passwords" (كلمات مرور التطبيقات)
- * 6. اختر "Select app" → Other (Custom name)
- * 7. اكتب: "Tawal Academy"
- * 8. اضغط "Generate"
- * 9. انسخ الكلمة المكونة من 16 حرف (مثلاً: abcd efgh ijkl mnop)
- * 10. في Railway Variables:
- * EMAIL_USER=youremail@gmail.com
- * EMAIL_PASS=abcdefghijklmnop  (بدون مسافات!)
- * * ⚠️ تحذير: إذا فشل هذا أيضاً، استخدم SendGrid (الحل 1)
- * * =================================================================================
- */
