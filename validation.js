@@ -1,17 +1,15 @@
 /*
  * =================================================================================
- * VALIDATION.JS - Input Validation Schemas using Joi
+ * VALIDATION.JS - Input Validation Schemas (Updated for OTP)
  * =================================================================================
  */
 
 const Joi = require('joi');
 
-// دالة وسيطة (Middleware) لفحص البيانات
 const validateRequest = (schema) => {
     return (req, res, next) => {
         const { error } = schema.validate(req.body);
         if (error) {
-            // إذا كانت البيانات غير صالحة، نرفض الطلب فوراً
             return res.status(400).json({ 
                 error: `Validation Error: ${error.details[0].message.replace(/"/g, '')}` 
             });
@@ -20,35 +18,39 @@ const validateRequest = (schema) => {
     };
 };
 
-// تعريف قواعد البيانات (Schemas)
 const schemas = {
-    // 1. تسجيل طالب جديد
-    studentRegister: Joi.object({
-        name: Joi.string().min(3).max(50).required().trim().messages({
-            'string.min': 'Name must be at least 3 characters',
-            'string.max': 'Name cannot exceed 50 characters',
-            'any.required': 'Name is required'
-        }),
+    // 1. طلب رمز OTP (جديد)
+    otpRequest: Joi.object({
         email: Joi.string().email().required().trim().messages({
             'string.email': 'Invalid email format',
             'any.required': 'Email is required'
-        }),
-        fingerprint: Joi.string().optional().allow('')
+        })
     }),
 
-    // 2. تسجيل دخول الأدمن
+    // 2. تسجيل طالب جديد (تم التحديث لإضافة OTP)
+    studentRegister: Joi.object({
+        name: Joi.string().min(3).max(50).required().trim(),
+        email: Joi.string().email().required().trim(),
+        fingerprint: Joi.string().optional().allow(''),
+        // 🔥 حقل جديد: كود التحقق إجباري ومكون من 6 أرقام
+        otp: Joi.string().length(6).pattern(/^[0-9]+$/).required().messages({
+            'string.length': 'OTP must be 6 digits',
+            'string.pattern.base': 'OTP must be numbers only',
+            'any.required': 'OTP code is required'
+        })
+    }),
+
+    // باقي القواعد كما هي...
     adminLogin: Joi.object({
         username: Joi.string().required(),
         password: Joi.string().required()
     }),
 
-    // 3. إرسال رسالة دعم
     message: Joi.object({
         studentId: Joi.number().integer().required(),
         message: Joi.string().min(2).max(500).required().trim()
     }),
 
-    // 4. حفظ نتيجة اختبار
     quizResult: Joi.object({
         studentId: Joi.number().integer().required(),
         quizName: Joi.string().required(),
@@ -58,14 +60,12 @@ const schemas = {
         correctAnswers: Joi.number().integer().min(0).required()
     }),
 
-    // 5. تسجيل نشاط
     activityLog: Joi.object({
         studentId: Joi.number().integer().required(),
         activityType: Joi.string().required(),
         subjectName: Joi.string().optional().allow('')
     }),
 
-    // 6. التحقق من البصمة
     fingerprintCheck: Joi.object({
         fingerprint: Joi.string().required()
     })
