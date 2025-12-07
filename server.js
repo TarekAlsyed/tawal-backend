@@ -16,7 +16,7 @@ const DB_URL = process.env.DATABASE_URL;
 // 2. الملحقات والمعدات
 const express = require('express');
 const { Pool } = require('pg');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Joi = require('joi');
 const cors = require('cors');
