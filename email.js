@@ -1,99 +1,51 @@
 /*
  * =================================================================================
- * EMAIL.JS - Version 22.0.2 (CRITICAL FIX: Force IPv4 + Timeouts)
+ * EMAIL.JS - Resend API Version (Fast & Secure)
  * =================================================================================
  */
 
 require('dotenv').config();
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
-// 🔥 إعداد Gmail مع إجبار استخدام IPv4 لمنع Timeouts
-const createGmailTransporter = () => {
-    return nodemailer.createTransport({
-        service: 'gmail',
-        host: 'smtp.gmail.com',
-        port: 587,
-        secure: false, // false for port 587
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS // ⚠️ تأكد أن هذا App Password
-        },
-        tls: {
-            rejectUnauthorized: false,
-            ciphers: 'SSLv3'
-        },
-        // 🔥🔥🔥 الإصلاح الحاسم لمشكلة Railway Timeout 🔥🔥🔥
-        family: 4, // يجبر النظام على استخدام IPv4 فقط (يحل مشكلة ETIMEDOUT)
-        connectionTimeout: 20000, // زيادة المهلة لـ 20 ثانية
-        greetingTimeout: 10000,
-        socketTimeout: 20000
-    });
-};
-
-// 🔥 Fallback: محاولة Port 465 (مع IPv4 أيضاً)
-const createGmailSecureTransporter = () => {
-    return nodemailer.createTransport({
-        service: 'gmail',
-        host: 'smtp.gmail.com',
-        port: 465,
-        secure: true, // true for port 465
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS
-        },
-        // 🔥🔥🔥 الإصلاح الحاسم هنا أيضاً 🔥🔥🔥
-        family: 4, // إجبار IPv4
-        connectionTimeout: 20000,
-        greetingTimeout: 10000,
-        socketTimeout: 20000
-    });
-};
+// تهيئة مكتبة Resend
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const sendOTP = async (toEmail, otpCode) => {
-    console.log(`📧 Attempting to send OTP to ${toEmail}...`);
-    
-    const mailOptions = {
-        from: `"Tawal Academy Support" <${process.env.EMAIL_USER}>`,
-        to: toEmail,
-        subject: '🔐 رمز التحقق الخاص بك (Tawal Academy)',
-        html: `
-            <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px; background-color: #f4f4f4;">
-                <div style="background-color: white; padding: 30px; border-radius: 10px; max-width: 500px; margin: auto;">
-                    <h2 style="color: #2c3e50;">مرحباً بك في Tawal Academy</h2>
-                    <p style="color: #555;">لإكمال تسجيل الدخول، يرجى استخدام رمز التحقق التالي:</p>
-                    <div style="background-color: #eee; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 5px; color: #333; margin: 20px 0;">
-                        ${otpCode}
-                    </div>
-                    <p style="color: #999; font-size: 12px;">هذا الرمز صالح لمدة 10 دقائق فقط.</p>
-                    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-                    <p style="color: #aaa; font-size: 11px;">إذا لم تطلب هذا الرمز، يرجى تجاهل هذه الرسالة.</p>
-                </div>
-            </div>
-        `
-    };
+    console.log(`📧 [Resend] Attempting to send OTP to ${toEmail}...`);
 
-    // المحاولة الأولى: Port 587 (TLS)
     try {
-        const transporter = createGmailTransporter();
-        const info = await transporter.sendMail(mailOptions);
-        console.log(`✅ [Gmail TLS] OTP sent to ${toEmail}: ${info.messageId}`);
-        return true;
-    } catch (error587) {
-        console.warn(`⚠️ [Gmail TLS Failed] ${error587.message}`);
-        console.log('🔄 Trying fallback: Port 465 (SSL)...');
-        
-        // المحاولة الثانية: Port 465 (SSL)
-        try {
-            const secureTransporter = createGmailSecureTransporter();
-            const info = await secureTransporter.sendMail(mailOptions);
-            console.log(`✅ [Gmail SSL] OTP sent to ${toEmail}: ${info.messageId}`);
-            return true;
-        } catch (error465) {
-            console.error('❌ [Gmail SSL Also Failed]', error465.message);
-            // لا حاجة لطباعة الخطأ الكامل إذا كان Timeout، الرسالة تكفي
-            if (error465.code !== 'ETIMEDOUT') console.error(error465);
+        const data = await resend.emails.send({
+            // ⚠️ ملاحظة: في الخطة المجانية، يمكنك الإرسال فقط إلى بريدك الإلكتروني الذي سجلت به
+            // لكي ترسل للطلاب، يجب توثيق الدومين الخاص بك في Resend
+            // أو استخدم 'onboarding@resend.dev' كمرسل (للتجربة فقط)
+            from: 'Tawal Academy <onboarding@resend.dev>', 
+            to: toEmail, 
+            subject: '🔐 رمز التحقق الخاص بك (Tawal Academy)',
+            html: `
+                <div style="font-family: Arial, sans-serif; text-align: center; padding: 20px; background-color: #f4f4f4;">
+                    <div style="background-color: white; padding: 30px; border-radius: 10px; max-width: 500px; margin: auto;">
+                        <h2 style="color: #2c3e50;">مرحباً بك في Tawal Academy</h2>
+                        <p style="color: #555;">لإكمال تسجيل الدخول، يرجى استخدام رمز التحقق التالي:</p>
+                        <div style="background-color: #eee; padding: 15px; font-size: 24px; font-weight: bold; letter-spacing: 5px; color: #333; margin: 20px 0;">
+                            ${otpCode}
+                        </div>
+                        <p style="color: #999; font-size: 12px;">هذا الرمز صالح لمدة 10 دقائق فقط.</p>
+                    </div>
+                </div>
+            `
+        });
+
+        if (data.error) {
+            console.error('❌ Resend API Error:', data.error);
             return false;
         }
+
+        console.log(`✅ OTP sent successfully via Resend. ID: ${data.data.id}`);
+        return true;
+
+    } catch (error) {
+        console.error('❌ Resend Connection Error:', error);
+        return false;
     }
 };
 
