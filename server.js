@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 24.0.1 (FIXED: Railway Proxy Trust Enabled)
+ * SERVER.JS - Version 24.0.5 (FINAL SECURE: Strict Admin Limits + Proxy Fix)
  * =================================================================================
  */
 
@@ -26,6 +26,7 @@ const app = express();
 
 // 🔥🔥🔥 الإصلاح الجذري لمشكلة Railway & Rate Limit 🔥🔥🔥
 // هذا السطر يخبر Express بأن يثق في الترويسات القادمة من Railway Proxy
+// ضروري جداً لكي يعمل الـ Rate Limit ولا يحظر الجميع
 app.set('trust proxy', 1); 
 
 const PORT = process.env.PORT || 3001;
@@ -69,34 +70,37 @@ app.use((req, res, next) => {
     next();
 });
 
-// Rate Limiting
+// Rate Limiting (General)
 const generalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 1000, 
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
-    // التأكيد على تخطي التحقق المزعج إذا استمرت المشكلة (إجراء احترازي)
     validate: { xForwardedForHeader: false }
 });
 
+// 🔥🔥🔥 Rate Limiting (Admin Login - STRICT) 🔥🔥🔥
 const loginLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, 
-    max: 20, 
-    message: { error: 'Too many login attempts, please try again later.' },
+    windowMs: 15 * 60 * 1000, // 15 دقيقة
+    max: 5, // 5 محاولات فقط
+    message: { error: 'Too many login attempts. Admin panel locked for 15 minutes.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipSuccessfulRequests: true, // لا تحسب المحاولات الناجحة (عشان الأدمن ميعملش بلوك لنفسه)
     validate: { xForwardedForHeader: false }
 });
 
 // OTP Limiter
 const otpLimiter = rateLimit({
     windowMs: 60 * 60 * 1000, 
-    max: 10, // تم الرفع قليلاً للتجربة
+    max: 10, 
     message: { error: 'Too many OTP requests, please wait an hour.' },
     validate: { xForwardedForHeader: false }
 });
 
 app.use('/api/', generalLimiter);
-app.use('/api/admin/login', loginLimiter); 
+app.use('/api/admin/login', loginLimiter); // تطبيق القيد الصارم هنا
 app.use('/api/auth/send-otp', otpLimiter); 
 
 // Initialize Database
@@ -143,7 +147,7 @@ app.post('/api/auth/send-otp', validateRequest(schemas.otpRequest), async (req, 
         const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
         await redisClient.setEx(`otp:${email}`, 600, otpCode);
         
-        console.log(`📧 Attempting to send OTP to ${email}...`); // Log للتتبع
+        console.log(`📧 Attempting to send OTP to ${email}...`); 
         const sent = await sendOTP(email, otpCode);
 
         if (sent) {
@@ -181,13 +185,17 @@ app.get('/api/public-stats', async (req, res) => {
     }
 });
 
-// Admin Login
+// 🔥🔥🔥 Admin Login (SECURED) 🔥🔥🔥
 app.post('/api/admin/login', validateRequest(schemas.adminLogin), async (req, res) => {
     const { username, password } = req.body;
-    const userToFind = username || 'admin'; 
+    
+    // منع الدخول بدون اسم مستخدم (إصلاح الثغرة المنطقية)
+    if (!username || !password) {
+        return res.status(400).json({ error: 'يجب إدخال اسم المستخدم وكلمة المرور' });
+    }
 
     try {
-        const result = await pool.query('SELECT * FROM admins WHERE username = $1', [userToFind]);
+        const result = await pool.query('SELECT * FROM admins WHERE username = $1', [username]);
         
         if (result.rows.length === 0) {
             return res.status(401).json({ error: 'Invalid credentials' });
@@ -509,8 +517,8 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '24.0.1', 
-    security: 'FULL ARMORED (DB Split + HPP + XSS + Joi + TrustedProxy) ✅',
+    version: '24.0.5', 
+    security: 'FULL ARMORED (DB Split + HPP + XSS + Joi + TrustedProxy + RateLimitStrict) ✅',
     performance: 'REDIS CACHING ENABLED 🚀',
     auth: 'EMAIL OTP ENABLED 🔐',
     uploads: 'CLOUDINARY + LOCAL 📂',
@@ -519,5 +527,5 @@ app.get('/api/health', (req, res) => res.json({
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 24.0.1 - Railway Proxy Support Added!`);
+    console.log(`✅ Version 24.0.5 - Secure Admin Mode & Proxy Trust Active!`);
 });
