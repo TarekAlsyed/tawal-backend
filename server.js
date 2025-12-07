@@ -22,6 +22,10 @@ const cors = require('cors');
 const app = express();
 const pool = new Pool({ connectionString: DB_URL });
 
+// ✅ Initialize database on startup
+const { initializeDatabase } = require('./database');
+initializeDatabase().catch(err => console.error('Failed to init DB:', err));
+
 // استيراد cache و email بشكل آمن
 let cache, sendEmail;
 try {
@@ -426,7 +430,7 @@ app.post('/api/messages', async (req, res) => {
         }
 
         const resDb = await query(
-            'INSERT INTO support_messages (student_id, content) VALUES ($1, $2) RETURNING created_at',
+            'INSERT INTO messages (student_id, content) VALUES ($1, $2) RETURNING created_at',
             [studentId, message]
         );
         
@@ -449,7 +453,7 @@ app.get('/api/students/:id/messages', async (req, res) => {
     
     try {
         const messagesRes = await query(
-            'SELECT content, admin_reply as adminReply, created_at as createdAt FROM support_messages WHERE student_id = $1 ORDER BY created_at DESC',
+            'SELECT content, admin_reply as adminReply, created_at as createdAt FROM messages WHERE student_id = $1 ORDER BY created_at DESC',
             [studentId]
         );
         const messages = messagesRes.rows;
@@ -489,7 +493,7 @@ app.post('/api/log-activity', async (req, res) => {
 
     try {
         await query(
-            'INSERT INTO activity_log (student_id, activity_type, subject_name) VALUES ($1, $2, $3)',
+            'INSERT INTO activity_logs (student_id, activity_type, subject_name) VALUES ($1, $2, $3)',
             [studentId, activityType, subjectName]
         );
         res.status(201).json({ message: 'Activity logged' });
@@ -539,14 +543,14 @@ app.get('/api/admin/messages', async (req, res) => {
     try {
         const messages = await query(`
             SELECT 
-                sm.id, 
-                sm.content, 
-                sm.admin_reply as adminreply,
-                sm.created_at as createdat,
+                m.id, 
+                m.content, 
+                m.admin_reply as adminreply,
+                m.created_at as createdat,
                 s.name as studentName
-            FROM support_messages sm
-            JOIN students s ON sm.student_id = s.id
-            ORDER BY sm.created_at DESC
+            FROM messages m
+            JOIN students s ON m.student_id = s.id
+            ORDER BY m.created_at DESC
             LIMIT 50
         `);
         res.status(200).json(messages.rows);
@@ -565,7 +569,7 @@ app.get('/api/admin/activity-logs', async (req, res) => {
                 al.subject_name as subjectname,
                 al.timestamp,
                 s.name as studentName
-            FROM activity_log al
+            FROM activity_logs al
             JOIN students s ON al.student_id = s.id
             ORDER BY al.timestamp DESC
             LIMIT 100
