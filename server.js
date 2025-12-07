@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 21.1.0 (Security Enabled: HPP & XSS Sanitization)
+ * SERVER.JS - Version 21.2.0 (MAX SECURITY: DB Split + HPP + XSS + Joi Validation)
  * =================================================================================
  */
 
@@ -15,7 +15,8 @@ const jwt = require('jsonwebtoken');
 const compression = require('compression'); 
 const hpp = require('hpp'); // 🔥 Security: Prevent HTTP Parameter Pollution
 const xss = require('xss'); // 🔥 Security: XSS Sanitizer
-const { pool, initializeDatabase } = require('./database'); 
+const { pool, initializeDatabase } = require('./database'); // 🔥 Database Module
+const { validateRequest, schemas } = require('./validation'); // 🔥 Validation Module
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -108,8 +109,8 @@ app.get('/api/public-stats', async (req, res) => {
     }
 });
 
-// Admin Login
-app.post('/api/admin/login', async (req, res) => {
+// 🔥 Admin Login (Secured with Validation)
+app.post('/api/admin/login', validateRequest(schemas.adminLogin), async (req, res) => {
     const { username, password } = req.body;
     const userToFind = username || 'admin'; 
 
@@ -139,10 +140,10 @@ app.post('/api/admin/login', async (req, res) => {
     }
 });
 
-// Fingerprint Verification
-app.post('/api/verify-fingerprint', async (req, res) => {
+// Fingerprint Verification (Secured with Validation)
+app.post('/api/verify-fingerprint', validateRequest(schemas.fingerprintCheck), async (req, res) => {
     const { fingerprint } = req.body;
-    if (!fingerprint) return res.status(400).json({ ok: false });
+    // Note: Validation middleware already checked if fingerprint exists
     try {
         const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
         if (blocked.rows.length > 0) return res.status(403).json({ ok: false, message: 'Device Blocked' });
@@ -152,13 +153,10 @@ app.post('/api/verify-fingerprint', async (req, res) => {
     }
 });
 
-// Student Registration
-app.post('/api/students/register', async (req, res) => {
+// Student Registration (Secured with Validation)
+app.post('/api/students/register', validateRequest(schemas.studentRegister), async (req, res) => {
     const { name, email, fingerprint } = req.body;
-    if (!name || !email) return res.status(400).json({ error: 'Missing data' });
-    
-    // Simple Input Validation
-    if (name.length > 100 || email.length > 255) return res.status(400).json({ error: 'Input too long' });
+    // Note: Joi Validation middleware already checked name length and email format
 
     if (fingerprint) {
         const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
@@ -184,10 +182,9 @@ app.post('/api/students/register', async (req, res) => {
     }
 });
 
-// Messages
-app.post('/api/messages', async (req, res) => {
+// Messages (Secured with Validation)
+app.post('/api/messages', validateRequest(schemas.message), async (req, res) => {
     const { studentId, message } = req.body;
-    if (!studentId || !message) return res.status(400).json({ error: 'Missing data' });
     
     try {
         const countQuery = await pool.query(
@@ -270,10 +267,9 @@ app.post('/api/logout', async (req, res) => {
     }
 });
 
-// Activity Logger
-app.post('/api/log-activity', async (req, res) => {
+// Activity Logger (Secured with Validation)
+app.post('/api/log-activity', validateRequest(schemas.activityLog), async (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
-    if (!studentId || !activityType) return res.status(400).json({ error: 'Missing data' });
 
     try {
         await pool.query(`
@@ -288,14 +284,12 @@ app.post('/api/log-activity', async (req, res) => {
     }
 });
 
-// Quiz Results
-app.post('/api/quiz-results', async (req, res) => {
+// Quiz Results (Secured with Validation)
+app.post('/api/quiz-results', validateRequest(schemas.quizResult), async (req, res) => {
     const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
     
-    if (!studentId || !quizName || score === undefined) {
-        return res.status(400).json({ error: 'Missing required fields' });
-    }
-    
+    // Note: Joi Validation already checked for missing fields and negative numbers
+
     try { 
         await pool.query(`
             INSERT INTO quiz_results (studentId, quizName, subjectId, score, totalQuestions, correctAnswers) 
@@ -601,13 +595,13 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '21.1.0', 
-    security: 'MAXIMUM (DB SPLIT + HPP + XSS) ✅',
+    version: '21.2.0', 
+    security: 'FULL ARMORED (DB Split + HPP + XSS + Joi) ✅',
     timestamp: new Date().toISOString()
 }));
 
 // Start Server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 21.1.0 - Security Shields (HPP & XSS) ACTIVATED!`);
+    console.log(`✅ Version 21.2.0 - All Security Systems Operational!`);
 });
