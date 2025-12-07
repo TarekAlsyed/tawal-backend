@@ -1,6 +1,6 @@
 /*
  * =================================================================================
- * SERVER.JS - Version 22.0.0 (High Performance: Redis Caching Enabled)
+ * SERVER.JS - Version 23.0.0 (Email Authentication & Redis OTP)
  * =================================================================================
  */
 
@@ -13,11 +13,12 @@ const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const compression = require('compression'); 
-const hpp = require('hpp'); // 🔥 Security: Prevent HTTP Parameter Pollution
-const xss = require('xss'); // 🔥 Security: XSS Sanitizer
-const { pool, initializeDatabase } = require('./database'); // 🔥 Database Module
-const { validateRequest, schemas } = require('./validation'); // 🔥 Validation Module
-const redisClient = require('./cache'); // 🔥 Redis Cache Module (NEW)
+const hpp = require('hpp'); 
+const xss = require('xss'); 
+const { pool, initializeDatabase } = require('./database'); 
+const { validateRequest, schemas } = require('./validation'); 
+const redisClient = require('./cache'); 
+const { sendOTP } = require('./email'); // 🔥 Email Service Module (NEW)
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -42,16 +43,12 @@ app.use(bodyParser.json({ limit: '50kb' }));
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // 🔥 DATA SECURITY ACTIVATION 🔥
-
-// 1. Prevent HTTP Parameter Pollution
 app.use(hpp());
 
-// 2. Data Sanitization against XSS (Cross-Site Scripting)
 app.use((req, res, next) => {
     if (req.body) {
         Object.keys(req.body).forEach(key => {
             if (typeof req.body[key] === 'string') {
-                // Clean any malicious scripts from input strings
                 req.body[key] = xss(req.body[key]);
             }
         });
@@ -73,8 +70,16 @@ const loginLimiter = rateLimit({
     message: { error: 'Too many login attempts, please try again later.' }
 });
 
+// 🔥 OTP Limiter (Prevent Email Spam)
+const otpLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 Hour
+    max: 5, // Allow max 5 OTP requests per hour per IP
+    message: { error: 'Too many OTP requests, please wait an hour.' }
+});
+
 app.use('/api/', generalLimiter);
 app.use('/api/admin/login', loginLimiter); 
+app.use('/api/auth/send-otp', otpLimiter); // Apply limiter to OTP endpoint
 
 // Initialize Database
 initializeDatabase();
@@ -94,17 +99,41 @@ function authenticateAdmin(req, res, next) {
 
 // ================= API ENDPOINTS =================
 
-// 🔥 Public Stats (CACHED with Redis)
+// 🔥 REQUEST OTP (New Endpoint)
+app.post('/api/auth/send-otp', validateRequest(schemas.otpRequest), async (req, res) => {
+    const { email } = req.body;
+
+    try {
+        // 1. Check if student already exists (Optional - depends on logic)
+        // For now, we allow OTP for everyone to support Registration & Login flows
+        
+        // 2. Generate Random 6-digit Code
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // 3. Save to Redis (Expires in 10 minutes = 600 seconds)
+        // Key format: "otp:user@email.com"
+        await redisClient.setEx(`otp:${email}`, 600, otpCode);
+
+        // 4. Send Email
+        const sent = await sendOTP(email, otpCode);
+
+        if (sent) {
+            res.json({ message: 'OTP sent successfully', email });
+        } else {
+            res.status(500).json({ error: 'Failed to send email' });
+        }
+    } catch (e) {
+        console.error('OTP Error:', e);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Public Stats (Cached)
 app.get('/api/public-stats', async (req, res) => {
     try {
-        // 1. Check Redis Cache
         const cachedData = await redisClient.get('public_stats');
-        if (cachedData) {
-            // If found in cache, return it immediately (Ultra Fast ⚡)
-            return res.json(JSON.parse(cachedData));
-        }
+        if (cachedData) return res.json(JSON.parse(cachedData));
 
-        // 2. If not in cache, Query Database (Slower)
         const s = await pool.query('SELECT COUNT(*) as t FROM students');
         const q = await pool.query('SELECT COUNT(*) as t FROM quiz_results');
         
@@ -113,9 +142,7 @@ app.get('/api/public-stats', async (req, res) => {
             totalQuizzes: parseInt(q.rows[0].t)
         };
 
-        // 3. Save to Redis for 10 minutes (600 seconds)
         await redisClient.setEx('public_stats', 600, JSON.stringify(data));
-
         res.json(data);
     } catch (e) {
         console.error('Stats Error:', e);
@@ -123,7 +150,7 @@ app.get('/api/public-stats', async (req, res) => {
     }
 });
 
-// Admin Login (Secured with Validation)
+// Admin Login
 app.post('/api/admin/login', validateRequest(schemas.adminLogin), async (req, res) => {
     const { username, password } = req.body;
     const userToFind = username || 'admin'; 
@@ -154,7 +181,7 @@ app.post('/api/admin/login', validateRequest(schemas.adminLogin), async (req, re
     }
 });
 
-// Fingerprint Verification (Secured with Validation)
+// Fingerprint Verification
 app.post('/api/verify-fingerprint', validateRequest(schemas.fingerprintCheck), async (req, res) => {
     const { fingerprint } = req.body;
     try {
@@ -166,20 +193,34 @@ app.post('/api/verify-fingerprint', validateRequest(schemas.fingerprintCheck), a
     }
 });
 
-// Student Registration (Secured with Validation)
+// 🔥 Student Registration (NOW SECURED WITH OTP)
 app.post('/api/students/register', validateRequest(schemas.studentRegister), async (req, res) => {
-    const { name, email, fingerprint } = req.body;
+    const { name, email, fingerprint, otp } = req.body;
 
-    if (fingerprint) {
-        const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
-        if (blocked.rows.length > 0) return res.status(403).json({ error: 'Device Blocked' });
-    }
-    
+    // 1. Verify OTP from Redis
     try {
+        const cachedOtp = await redisClient.get(`otp:${email}`);
+        
+        if (!cachedOtp) {
+            return res.status(400).json({ error: 'OTP expired or not found. Please request a new one.' });
+        }
+
+        if (cachedOtp !== otp) {
+            return res.status(400).json({ error: 'Invalid OTP code.' });
+        }
+
+        // 2. OTP is valid! Delete it to prevent reuse
+        await redisClient.del(`otp:${email}`);
+
+        // 3. Proceed with Registration (Existing Logic)
+        if (fingerprint) {
+            const blocked = await pool.query('SELECT 1 FROM blocked_fingerprints WHERE fingerprint = $1', [fingerprint]);
+            if (blocked.rows.length > 0) return res.status(403).json({ error: 'Device Blocked' });
+        }
+        
         const result = await pool.query('INSERT INTO students (name, email) VALUES ($1, $2) RETURNING *', [name, email]);
         const newStudent = result.rows[0];
         
-        // Invalidate public stats cache so the counter updates eventually
         await redisClient.del('public_stats');
 
         if (fingerprint) {
@@ -193,11 +234,12 @@ app.post('/api/students/register', validateRequest(schemas.studentRegister), asy
             if (existing.rows[0].isblocked) return res.status(403).json({ error: 'Account Blocked' });
             return res.json(existing.rows[0]);
         }
-        res.status(500).json({ error: 'Error' });
+        console.error('Register Error:', err);
+        res.status(500).json({ error: 'Error during registration' });
     }
 });
 
-// Messages (Secured with Validation)
+// Messages
 app.post('/api/messages', validateRequest(schemas.message), async (req, res) => {
     const { studentId, message } = req.body;
     
@@ -282,7 +324,7 @@ app.post('/api/logout', async (req, res) => {
     }
 });
 
-// Activity Logger (Secured with Validation)
+// Activity Logger
 app.post('/api/log-activity', validateRequest(schemas.activityLog), async (req, res) => {
     const { studentId, activityType, subjectName } = req.body;
 
@@ -299,7 +341,7 @@ app.post('/api/log-activity', validateRequest(schemas.activityLog), async (req, 
     }
 });
 
-// Quiz Results (Secured with Validation)
+// Quiz Results
 app.post('/api/quiz-results', validateRequest(schemas.quizResult), async (req, res) => {
     const { studentId, quizName, subjectId, score, totalQuestions, correctAnswers } = req.body;
     
@@ -309,7 +351,6 @@ app.post('/api/quiz-results', validateRequest(schemas.quizResult), async (req, r
             VALUES ($1, $2, $3, $4, $5, $6)
         `, [studentId, quizName, subjectId || 'unknown', score, totalQuestions || 0, correctAnswers || 0]);
         
-        // Invalidate public stats cache so the total quizzes counter updates
         await redisClient.del('public_stats');
 
         try {
@@ -422,21 +463,17 @@ app.get('/api/students/:id/logs', async (req, res) => {
     }
 });
 
-// 🔥 Quiz Status (CACHED with Redis)
+// Quiz Status (Cached)
 app.get('/api/quiz-status', async (req, res) => { 
     try {
-        // 1. Check Cache
         const cached = await redisClient.get('quiz_status');
         if (cached) return res.json(JSON.parse(cached));
 
-        // 2. DB Query
         const r = await pool.query('SELECT * FROM quiz_status'); 
         const map = {}; 
         r.rows.forEach(row => map[row.subjectid] = { locked: row.locked, message: row.message }); 
         
-        // 3. Save to Cache (1 Minute only - to allow updates)
         await redisClient.setEx('quiz_status', 60, JSON.stringify(map));
-
         res.json(map); 
     } catch (e) { 
         res.json({}); 
@@ -445,7 +482,6 @@ app.get('/api/quiz-status', async (req, res) => {
 
 // ================= ADMIN ROUTES =================
 
-// Get Recent Activity (All Students)
 app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
     try {
         const query = `
@@ -467,7 +503,6 @@ app.get('/api/admin/activity-logs', authenticateAdmin, async (req, res) => {
     }
 });
 
-// Messages Management
 app.get('/api/admin/messages', authenticateAdmin, async (req, res) => {
     try { 
         const r = await pool.query(`
@@ -501,7 +536,6 @@ app.delete('/api/admin/messages/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
-// Statistics
 app.get('/api/admin/stats', authenticateAdmin, async (req, res) => { 
     try { 
         const s = await pool.query('SELECT COUNT(*) as t FROM students'); 
@@ -517,7 +551,6 @@ app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
     } 
 });
 
-// Students Management
 app.get('/api/admin/students', authenticateAdmin, async (req, res) => { 
     try { 
         const r = await pool.query('SELECT * FROM students ORDER BY createdAt DESC'); 
@@ -536,7 +569,6 @@ app.post('/api/admin/students/:id/status', authenticateAdmin, async (req, res) =
     } 
 });
 
-// Fingerprint Management
 app.post('/api/admin/students/:id/block-fingerprint', authenticateAdmin, async (req, res) => { 
     try { 
         const fp = await pool.query('SELECT fingerprint FROM student_fingerprints WHERE studentId = $1 ORDER BY lastSeen DESC LIMIT 1', [req.params.id]); 
@@ -559,7 +591,6 @@ app.post('/api/admin/students/:id/unblock-fingerprint', authenticateAdmin, async
     } 
 });
 
-// 🔥 Quiz Lock Management (Updates Cache)
 app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res) => { 
     try { 
         await pool.query(`
@@ -569,7 +600,6 @@ app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res
             DO UPDATE SET locked = $2, message = $3, updatedAt = CURRENT_TIMESTAMP
         `, [req.params.subjectId, req.body.locked, req.body.message]); 
         
-        // 🔥 Invalidate Cache (Force refresh on next request)
         await redisClient.del('quiz_status');
 
         res.json({ message: 'Updated' }); 
@@ -578,7 +608,6 @@ app.post('/api/admin/quiz-status/:subjectId', authenticateAdmin, async (req, res
     } 
 });
 
-// Login Logs
 app.get('/api/admin/login-logs', authenticateAdmin, async (req, res) => { 
     try { 
         const r = await pool.query(`
@@ -594,7 +623,6 @@ app.get('/api/admin/login-logs', authenticateAdmin, async (req, res) => {
     } 
 });
 
-// Delete Student
 app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
     const client = await pool.connect();
     try {
@@ -612,7 +640,6 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
             return res.status(404).json({ error: 'Student not found' }); 
         }
         
-        // Invalidate public stats cache (Count changed)
         await redisClient.del('public_stats');
 
         await client.query('COMMIT');
@@ -628,14 +655,14 @@ app.delete('/api/admin/students/:id', authenticateAdmin, async (req, res) => {
 // Health Check
 app.get('/api/health', (req, res) => res.json({ 
     status: 'OK', 
-    version: '22.0.0', 
+    version: '23.0.0', 
     security: 'FULL ARMORED (DB Split + HPP + XSS + Joi) ✅',
     performance: 'REDIS CACHING ENABLED 🚀',
+    auth: 'EMAIL OTP ENABLED 🔐',
     timestamp: new Date().toISOString()
 }));
 
-// Start Server
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`✅ Version 22.0.0 - High Performance Mode (Redis) ACTIVATED!`);
+    console.log(`✅ Version 23.0.0 - Authentication System Online!`);
 });
